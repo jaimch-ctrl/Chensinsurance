@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>多保單整合智能試算 </title>
+<title>多保單整合智能試算 v7</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=DM+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
@@ -152,10 +152,13 @@ td.pct-cell{font-family:‘DM Mono’,monospace;font-size:11px;color:var(–purp
 
 <div class="panel" style="padding:12px 18px;margin-bottom:18px">
   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-    <button class="btn-small" onclick="saveToLocal()" style="background:var(--A)">💾 儲存到瀏覽器</button>
-    <button class="btn-small" onclick="loadFromLocal()" style="background:var(--B)">📂 讀取上次儲存</button>
+    <button class="btn-small" onclick="saveAsJson()" style="background:var(--A)">💾 匯出設定檔 (.json)</button>
+    <label class="btn-small" style="background:var(--B);cursor:pointer;display:inline-block">
+      📂 讀取設定檔 (.json)
+      <input type="file" accept=".json,application/json" onchange="loadFromJson(event)" style="display:none">
+    </label>
     <button class="btn-small" onclick="exportHTML()" style="background:var(--purple)">⬇ 匯出 HTML 檔案</button>
-    <button class="btn-small" onclick="window.print()" style="background:var(--gold)">🖨 列印 / 存成 PDF</button>
+    <button class="btn-small" onclick="printPage()" style="background:var(--gold)">🖨 列印 / 存成 PDF</button>
     <span style="font-size:11px;color:var(--muted);margin-left:8px" id="saveStatus"></span>
   </div>
 </div>
@@ -256,11 +259,11 @@ td.pct-cell{font-family:‘DM Mono’,monospace;font-size:11px;color:var(–purp
 <div class="charts">
   <div class="chart-box">
     <h3>各保單期末餘額走勢（USD）</h3>
-    <canvas id="chartPV" height="230"></canvas>
+    <canvas id="chartPV" style="min-height:230px"></canvas>
   </div>
   <div class="chart-box">
     <h3>年度領回來源 vs 目標 TWD</h3>
-    <canvas id="chartWD" height="230"></canvas>
+    <canvas id="chartWD" style="min-height:230px"></canvas>
   </div>
 </div>
 
@@ -747,7 +750,7 @@ borderColor:colors[i%colors.length][0],
 backgroundColor:colors[i%colors.length][1].replace(’.55’,’.12’),
 tension:.3,pointRadius:4,borderWidth:2.5,fill:true
 }))},
-options:{responsive:true}
+options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{font:{size:11}}}}}
 });
 chartWD=new Chart(document.getElementById(‘chartWD’),{
 type:‘bar’,
@@ -763,7 +766,7 @@ stack:‘s’
 })),
 {label:‘目標’,data:rows.map(()=>targetTWD),type:‘line’,borderColor:’#b83030’,borderDash:[6,4],pointRadius:0,borderWidth:2,fill:false}
 ]},
-options:{responsive:true,scales:{x:{stacked:true},y:{stacked:true}}}
+options:{responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true},y:{stacked:true}},plugins:{legend:{labels:{font:{size:11}}}}}
 });
 }
 
@@ -858,34 +861,56 @@ savedAt: new Date().toLocaleString(‘zh-TW’)
 };
 }
 
-function saveToLocal(){
+// ── 匯出設定檔 (.json) ──
+function saveAsJson(){
 try{
 const state = collectState();
-localStorage.setItem(‘policyApp_state’, JSON.stringify(state));
+const json = JSON.stringify(state, null, 2);
+const blob = new Blob([json], {type:‘application/json;charset=utf-8’});
+const url = URL.createObjectURL(blob);
+const a = document.createElement(‘a’);
+a.href = url;
+const name = (document.getElementById(‘clientName’)?.value||‘保單設定’).replace(/\s/g,’_’);
+a.download = `${name}_設定_${new Date().toISOString().slice(0,10)}.json`;
+document.body.appendChild(a);
+a.click();
+document.body.removeChild(a);
+URL.revokeObjectURL(url);
 const el = document.getElementById(‘saveStatus’);
-el.textContent = `✅ 已儲存 ${state.savedAt}`;
+el.textContent = ‘✅ 設定檔已下載，請保存到手機/電腦’;
 el.style.color = ‘var(–green)’;
-setTimeout(()=>el.textContent=’’, 3000);
+setTimeout(()=>el.textContent=’’, 5000);
 }catch(e){
-alert(‘儲存失敗：’+e.message);
+alert(‘匯出失敗：’+e.message);
 }
 }
 
-function loadFromLocal(){
+// ── 讀取設定檔 (.json) ──
+function loadFromJson(event){
+const file = event.target.files[0];
+if(!file) return;
+const reader = new FileReader();
+reader.onload = function(e){
 try{
-const raw = localStorage.getItem(‘policyApp_state’);
-if(!raw){ alert(‘找不到儲存資料’); return; }
-const state = JSON.parse(raw);
-if(!confirm(`讀取 ${state.savedAt} 的儲存資料？目前的設定將被取代。`)) return;
+const state = JSON.parse(e.target.result);
+if(!confirm(`讀取「${state.clientName||'未知客戶'}」的設定（儲存於 ${state.savedAt||'未知時間'}）？\n目前設定將被取代。`)) return;
 restoreState(state);
 const el = document.getElementById(‘saveStatus’);
-el.textContent = `📂 已讀取 ${state.savedAt}`;
+el.textContent = `✅ 已讀取設定檔（${state.savedAt||''}）`;
 el.style.color = ‘var(–B)’;
-setTimeout(()=>el.textContent=’’, 3000);
-}catch(e){
-alert(‘讀取失敗：’+e.message);
+setTimeout(()=>el.textContent=’’, 5000);
+}catch(err){
+alert(‘讀取失敗，請確認是正確的設定檔：’+err.message);
 }
+};
+reader.readAsText(file, ‘utf-8’);
+// Reset file input so same file can be re-selected
+event.target.value = ‘’;
 }
+
+// 舊函數保留相容性
+function saveToLocal(){ saveAsJson(); }
+function loadFromLocal(){ alert(‘請使用「讀取設定檔」按鈕選擇之前下載的 .json 檔’); }
 
 function restoreState(state){
 if(state.clientName) document.getElementById(‘clientName’).value = state.clientName;
@@ -912,6 +937,32 @@ rebuildAllRatioGrids();
 recalc();
 }
 
+function printPage(){
+// In Claude.ai artifact iframe, window.print() may be blocked.
+// Try multiple approaches.
+try {
+// First: try direct print
+if(window.self === window.top){
+window.print();
+} else {
+// We’re in an iframe — open a new window with current HTML and print
+const html = document.documentElement.outerHTML;
+const win = window.open(’’,’_blank’);
+if(win){
+win.document.write(html);
+win.document.close();
+win.focus();
+setTimeout(()=>{ win.print(); }, 800);
+} else {
+// Fallback: export HTML instead
+alert(‘列印功能在此環境受限。\n\n請改用「匯出 HTML 檔案」，下載後在瀏覽器開啟，再按 Cmd+P（Mac）或 Ctrl+P（Windows）列印/存成 PDF。’);
+}
+}
+} catch(e) {
+alert(‘列印功能在此環境受限。\n\n請改用「匯出 HTML 檔案」，下載後在瀏覽器開啟，再按 Cmd+P 或 Ctrl+P 列印/存成 PDF。’);
+}
+}
+
 function exportHTML(){
 // Auto-save first, then export current page as standalone HTML
 const state = collectState();
@@ -931,13 +982,8 @@ a.click();
 URL.revokeObjectURL(url);
 }
 
-// Auto-save every 60 seconds
-setInterval(()=>{
-try{
-const state = collectState();
-localStorage.setItem(‘policyApp_state_auto’, JSON.stringify(state));
-}catch(e){}
-}, 60000);
+// Auto-save removed (localStorage not available in all environments)
+// Use “匯出設定檔” button to save your work
 
 function resetDefault(){
 document.getElementById(‘policyList’).innerHTML=’’;
@@ -945,118 +991,86 @@ document.getElementById(‘lumpGrid’).innerHTML=’’;
 policySeq=0; lumpSeq=0;
 
 // ═══════════════════════════════════════════════════════════════
-// 陳志強 民國41年10月 現齡65歲（2025年）
-// 所有萬事利達為台幣保單，解約金÷30換算 USD
+// 陳志強 民國41年10月 現齡83歲
+// 所有保單數字皆為美金(USD)，直接填入
+// 2021/09、2021/11投保者現為保單第4年末
+// 2022/01投保金價美現為第3年末
+// 2025/05投保非常美現為第1年末
 // ═══════════════════════════════════════════════════════════════
 
-// ── 保單1：萬事利達 81215001（保誠人壽）被保人：陳志強本人 ──
-// 2021/09投保，陳志強61歲，年繳63,000台幣，繳21年(至81歲)
-// 現在83歲 = 保單第4年末（61+4-1=64歲，等等…61歲起第1年，2025=第4年）
-// 從圖2(萬事利達4)：yr4=23,598台幣÷30=787 USD
-// 解約金(台幣÷30)從yr4起: 787,1078,1401,1434,1569,1618,1728,2155,2156,
-//   2222,2289,2345,2344,2395,2436,2472,2499,2522,2547,2547
-// 保單號從圖2確認：81215001
-addPolicy({
-name:‘萬事利達(陳志強本人)’,company:‘保誠人壽’,no:‘81215001’,
-start:787,rate:3.0,mode:‘hybrid’,
-fixed:‘787,1078,1401,1434,1569,1618,1569,1569,1618,1728,2155,2156,2222,2289,2345,2344,2395,2436,2472,2499’,
-growth:‘0,0,0,200,200,200,200,200,200,200,200,200,200,200,200,200,200,200,200,200’,
-startYear:4,priority:4,canPrincipal:‘1’,floor:0,cap:0
-});
-
-// ── 保單2：金價美 FDD 7001355710（全球人壽）──
-// 2022/01投保，陳志強（被保人名為金嘉媚=虛擬），躉繳525,390 USD
-// 現在2025年=保單第3年末，解約金：512,039 USD
-// 從PDF(FDD)解約金(B欄)從yr3起:
-// 512039,515024,517960,520874,523759,526612,529426,532136,534804,537426,
-// 540001,542527,545011,547441,549813,552123
-// 增值回饋分享金從yr7起(yr1-6購買增額,已含在B欄):
-// 12361,12739,13127,13937,14791,15691,16159,16638,17129,17632,18149,18679,19223,19778
+// ── 保單1：金價美 FDD 7001355710（全球人壽）──
+// 2022/01投保，躉繳525,390 USD，被保人虛擬名=陳志強
+// 現第3年末，解約金512,039 USD
+// 解約金(B欄，USD)從yr3起(PDF讀取):
 addPolicy({
 name:‘金價美 FDD’,company:‘全球人壽’,no:‘7001355710’,
 start:512039,rate:2.8,mode:‘hybrid’,
 fixed:‘512039,515024,517960,520874,523759,526612,529426,532136,534804,537426,540001,542527,545011,547441,549813,552123’,
-growth:‘0,0,0,12361,12739,13127,13937,14791,15691,16159,16638,17129,17632,18149,18679,19223’,
+growth:‘0,0,0,0,12361,12739,13127,13937,14791,15691,16159,16638,17129,17632,18149,18679’,
 startYear:1,priority:1,canPrincipal:‘1’,floor:0,cap:0
 });
 
-// ── 保單3：非常美 FGD 88000792170（全球人壽）──
-// 2025/05投保，陳志強65歲，躉繳100,450 USD，宣告4.20%
-// 增值回饋=儲存生息（C欄累積，不購買增額）
-// 現第1年末：解約金(B欄)89,653 USD
-// 解約金(B欄)逐年: 89653,96731,98025,99343,100684,102030,103367,104795,106266,107787,
-//   110000,112513,114120,116402,117380,119031,120694,122368,124053,125747
-// 增值回饋分享金(儲存生息，yr7起開始領): 2595,2700,2809,2923,3043,3165,3208,3252,3299,3346
+// ── 保單2：非常美 FGD 88000792170（全球人壽）──
+// 2025/05投保，躉繳100,450 USD，宣告4.20%，增值回饋=儲存生息
+// 現第1年末，解約金89,653 USD
+// 解約金(B欄，USD)逐年(PDF讀取):
 addPolicy({
 name:‘非常美 FGD’,company:‘全球人壽’,no:‘88000792170’,
 start:89653,rate:4.2,mode:‘hybrid’,
 fixed:‘89653,96731,98025,99343,100684,102030,103367,104795,106266,107787,110000,112513,114120,116402,117380,119031,120694,122368,124053,125747’,
-growth:‘0,0,0,0,0,0,2595,2700,2809,2923,3043,3165,3208,3252,3299,3346’,
+growth:‘0,0,0,0,0,0,2595,2700,2809,2923,3043,3165,3208,3252,3299,3346,3395,3443’,
+startYear:4,priority:2,canPrincipal:‘1’,floor:0,cap:0
+});
+
+// ── 保單3：萬事利達 81224035（保誠人壽）被保人：陳怡亘 31歲起 ──
+// 2021/11投保，年繳124,200 USD，現第4年末
+// 解約金(USD)逐年完整資料，從yr4起:
+addPolicy({
+name:‘萬事利達(陳怡亘)’,company:‘保誠人壽’,no:‘81224035’,
+start:35200,rate:3.2,mode:‘hybrid’,
+fixed:‘35200,48435,63078,66074,73117,76317,141051,147617,153645,159842,165523,170938,176092,180987,185657,190100,194317,199906,205369,210406,215179,219574,223962,227983,231790,235476,238842,242719,249978,253222’,
+growth:‘0,13235,14643,2996,7043,3200,64734,6566,6028,6197,5681,5415,5154,4895,4670,4443,4217,5589,5463,5037,4773,4395,4388,4021,3807,3686,3366,3877,7259,3244’,
 startYear:5,priority:3,canPrincipal:‘1’,floor:0,cap:0
 });
 
-// ── 保單4：萬事利達 81224035（保誠人壽）被保人：陳怡亘 ──
-// 2021/11投保，陳怡亘31歲，年繳124,200台幣，繳25年
-// 現2025年=保單第4年末，解約金：35,200÷30=1,173 USD
-// 解約金(台幣)從yr1: 5632,14643,23654,35200,48435,63078,66074,73117,76317,
-//   141051,147617,153645,159842,165523,170938,176092,180987,185657,190100,194317,199906,
-//   205369,210406,215179,219574,223962,227983,231790,235476,238842,242719,249978,253222
-// ÷30換算 USD，從yr4起:
-// 1173,1615,2103,2203,2439,2544,4702,4921,5328,5519,5698,6031,5989,6184,6366,6536,
-//   6699,6855,7003,7144,7328,7014,7179,7339,7486,7599,7726,7849,8028
-addPolicy({
-name:‘萬事利達(陳怡亘)’,company:‘保誠人壽’,no:‘81224035’,
-start:1173,rate:3.2,mode:‘hybrid’,
-fixed:‘1173,1615,2103,2203,2439,2544,4702,4921,5328,5519,5698,6031,5989,6184,6366,6536,6699,6855,7003,7144’,
-growth:‘0,0,220,220,220,220,220,220,220,220,220,220,220,220,220,267,267,267,267,267’,
-startYear:8,priority:5,canPrincipal:‘1’,floor:0,cap:0
-});
-
-// ── 保單5：萬事利達 81215039（保誠人壽）被保人：陳韋庭 ──
-// 2021/09投保，陳韋庭29歲，年繳121,080台幣，繳25年
-// 現2025年=保單第4年末，解約金：34,800÷30=1,160 USD
-// 解約金(台幣)從yr1: 5510,14500,23490,34800,47850,62650,65364,71958,75468,
-//   137648,142726,147334,151802,156134,159926,163696,196979,170193,173140,175917
-// ÷30 從yr4起:
-// 1160,1595,2088,2179,2399,2516,4588,4758,4912,5060,5204,5331,6566,5673,5771,5864
+// ── 保單4：萬事利達 81215039（保誠人壽）被保人：陳韋庭 29歲起 ──
+// 2021/09投保，年繳121,080 USD，現第4年末
 addPolicy({
 name:‘萬事利達(陳韋庭)’,company:‘保誠人壽’,no:‘81215039’,
-start:1160,rate:3.2,mode:‘hybrid’,
-fixed:‘1160,1595,2088,2179,2399,2516,4588,4758,4912,5060,5204,5331,6566,5673,5771,5864’,
-growth:‘0,0,215,215,215,215,215,215,215,215,215,215,215,215,215,215’,
-startYear:9,priority:6,canPrincipal:‘1’,floor:0,cap:0
+start:34800,rate:3.2,mode:‘hybrid’,
+fixed:‘34800,47850,62650,65364,71958,75468,137648,142726,147334,151802,156134,159926,163696,196979,170193,173140,175917,17388,200225,209573,214009,218090’,
+growth:‘0,13050,14800,2714,6594,3510,62180,5078,4608,4468,4332,3792,3770,33283,0,2947,2777,0,182837,9348,4436,4081’,
+startYear:6,priority:4,canPrincipal:‘1’,floor:0,cap:0
 });
 
-// ── 保單6：萬事利達 81224053（保誠人壽）被保人：陳加綺 ──
-// 2021/11投保，陳加綺27歲，年繳126,000台幣，繳25年+
-// 現2025年=保單第4年末，解約金：36,020÷30=1,201 USD
-// 解約金(台幣)從yr1: 5589,14905,4221,36020,67120,74414,77470,143208,149938,
-//   156260,162457,168266,176760,179213,184025,188595,193043,197390,202732,207652,
-//   212455,216871,220969,224752,228290,231462,234449,237283,240147,242785,245168,247280,249144
-// ÷30 從yr4起:
-// 1201,2237,2481,2582,4774,4998,5209,5409,5609,5742,5942,6138,6320,6492,6658,6820,6968,7091,7235,7373,
-//   7496,7613,7720,7828,7929,8035,8149,8237
+// ── 保單5：萬事利達 81224053（保誠人壽）被保人：陳加綺 27歲起 ──
+// 2021/11投保，年繳126,000 USD，現第4年末
 addPolicy({
 name:‘萬事利達(陳加綺)’,company:‘保誠人壽’,no:‘81224053’,
-start:1201,rate:3.2,mode:‘hybrid’,
-fixed:‘1201,2237,2481,2582,4774,4998,5209,5409,5609,5742,5942,6138,6320,6492,6658,6820,6968,7091,7235,7373’,
-growth:‘0,0,224,224,224,224,224,224,224,224,224,224,224,224,224,267,267,267,267,267’,
-startYear:10,priority:7,canPrincipal:‘1’,floor:0,cap:0
+start:36020,rate:3.2,mode:‘hybrid’,
+fixed:‘36020,67120,74414,77470,143208,149938,156260,162457,168266,176760,179213,184025,188595,193043,197390,202732,207652,212455,216871,220969,224752,228290,231462,234449,237283,240147,242785,245168,247280,249144’,
+growth:‘0,31100,7294,3056,65738,6730,6322,6197,5809,8494,2453,4812,4570,4448,4347,5342,4920,4803,4416,4098,3783,3538,3172,2987,2834,2864,2638,2383,2112,1864’,
+startYear:7,priority:5,canPrincipal:‘1’,floor:0,cap:0
 });
 
-// ── 保單7：萬事利達 81224099（保誠人壽）被保人：陳韋庭第2張 ──
-// 2021/11投保，陳韋庭29歲，年繳62,442台幣，繳25年
-// 現2025年=保單第4年末，解約金：17,766÷30=592 USD
-// 解約金(台幣)從yr1: 2813,7703,11992,17766,24429,31832,33330,36737,38529,
-//   70273,37411,76144,73411,76144,78674,80997,85911,84680,86090,87333,88326,89110,89871,89871
-// ÷30 從yr4起:
-// 592,814,1061,1111,1224,1284,2342,1247,2538,2562,2621,2699,2447,2538,2611,2700,2774,2837,2871,2971,2996,2971
+// ── 保單6：萬事利達 81215001（保誠人壽）被保人：陳志強本人 61歲起 ──
+// 2021/09投保，年繳63,000 USD，繳至81歲，現第4年末
+addPolicy({
+name:‘萬事利達(陳志強本人)’,company:‘保誠人壽’,no:‘81215001’,
+start:23598,rate:3.0,mode:‘hybrid’,
+fixed:‘23598,32348,42026,43344,47082,48532,64555,66718,68604,70319,71842,73085,74146,74982,75659,76120,76413,76562’,
+growth:‘0,8750,9678,1318,3738,1450,16023,2163,1886,1715,1523,1243,1061,836,677,461,293,149’,
+startYear:8,priority:6,canPrincipal:‘1’,floor:0,cap:0
+});
+
+// ── 保單7：萬事利達 81224099（保誠人壽）被保人：陳韋庭第2張 29歲起 ──
+// 2021/09投保，年繳62,442 USD，現第4年末
 addPolicy({
 name:‘萬事利達2(陳韋庭)’,company:‘保誠人壽’,no:‘81224099’,
-start:592,rate:3.2,mode:‘hybrid’,
-fixed:‘592,814,1061,1111,1224,1284,2342,1247,2538,2562,2621,2699,2447,2538,2611,2700,2774,2837,2871,2971’,
-growth:‘0,0,111,111,111,111,111,111,111,111,111,111,111,111,111,133,133,133,133,133’,
-startYear:11,priority:8,canPrincipal:‘1’,floor:0,cap:0
+start:17766,rate:3.2,mode:‘hybrid’,
+fixed:‘17766,24429,31832,33330,36737,38529,70273,37411,76144,73411,76144,78674,80997,85911,84680,86090,87333,88326,89110,89871,89871’,
+growth:‘0,6663,7403,1498,3407,1792,31744,0,38733,0,2733,2530,2323,4914,0,1410,1243,993,784,761,0’,
+startYear:9,priority:7,canPrincipal:‘1’,floor:0,cap:0
 });
 
 rebuildAllRatioGrids();
