@@ -8,200 +8,211 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=DM+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script>
 // ══════════════════════════════════════════════════════════
-// MiniChart — 純 Canvas，不依賴任何外部資源
-// 支援：line、bar（stacked）
+// MiniChart v2 — 純 Canvas，零依賴，GitHub Pages 相容
 // ══════════════════════════════════════════════════════════
-window.MiniChart = (function(){
-  function MiniChart(canvas, config){
-    this.canvas = canvas;
-    this.config = config;
-    this._draw();
-    // responsive resize
-    this._ro = new ResizeObserver(()=>this._draw());
-    this._ro.observe(canvas.parentElement);
-  }
-  MiniChart.prototype.destroy = function(){
-    if(this._ro) this._ro.disconnect();
-  };
-  MiniChart.prototype.update = function(config){
-    this.config = config;
-    this._draw();
-  };
-  MiniChart.prototype._draw = function(){
-    const cfg = this.config;
-    const canvas = this.canvas;
-    const dpr = window.devicePixelRatio||1;
-    const parent = canvas.parentElement;
-    const W = Math.max(parent.getBoundingClientRect().width||0, parent.clientWidth||0, canvas.offsetWidth||0, 280);
-    const H = 220;
-    canvas.style.width = W+'px';
-    canvas.style.height = H+'px';
-    canvas.width = W*dpr;
-    canvas.height = H*dpr;
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr,dpr);
-    ctx.clearRect(0,0,W,H);
+(function(global){
+  var instances = [];
+
+function MiniChart(canvas, config){
+this.canvas = canvas;
+this.config = config;
+this._retries = 0;
+var self = this;
+// 用 rAF 確保 layout 完成再畫
+requestAnimationFrame(function(){ self._safeDraw(); });
+// window resize 重繪
+this._onResize = function(){ requestAnimationFrame(function(){ self._safeDraw(); }); };
+window.addEventListener(‘resize’, this._onResize);
+instances.push(this);
+}
+
+MiniChart.prototype.destroy = function(){
+window.removeEventListener(‘resize’, this._onResize);
+var idx = instances.indexOf(this);
+if(idx >= 0) instances.splice(idx, 1);
+var ctx = this.canvas.getContext(‘2d’);
+ctx.clearRect(0,0,this.canvas.width,this.canvas.height);
+};
+
+MiniChart.prototype._safeDraw = function(){
+var self = this;
+var parent = this.canvas.parentElement;
+if(!parent){ return; }
+// 多種方式取得寬度
+var W = parent.getBoundingClientRect().width
+|| parent.offsetWidth
+|| parent.clientWidth;
+if(W < 50 && this._retries < 10){
+this._retries++;
+setTimeout(function(){ requestAnimationFrame(function(){ self._safeDraw(); }); }, 100 * this._retries);
+return;
+}
+if(W < 50) W = 300; // 最終回退值
+this._draw(W);
+};
+
+MiniChart.prototype._draw = function(W){
+var cfg = this.config;
+var canvas = this.canvas;
+var dpr = Math.min(window.devicePixelRatio || 1, 2);
+var H = 200;
 
 ```
-const PAD = {top:16, right:16, bottom:36, left:60};
-const gW = W-PAD.left-PAD.right;
-const gH = H-PAD.top-PAD.bottom;
-const labels = cfg.data.labels||[];
-const datasets = cfg.data.datasets||[];
-const type = cfg.type||'line';
+canvas.style.width  = W + 'px';
+canvas.style.height = H + 'px';
+canvas.width  = Math.round(W * dpr);
+canvas.height = Math.round(H * dpr);
 
-// ── Compute value ranges ──
-let yMin=Infinity, yMax=-Infinity;
-datasets.forEach(ds=>{
-  if(ds.type==='line'||type==='line'){
-    (ds.data||[]).forEach(v=>{ if(v!=null){yMin=Math.min(yMin,v);yMax=Math.max(yMax,v);} });
+var ctx = canvas.getContext('2d');
+ctx.scale(dpr, dpr);
+ctx.clearRect(0, 0, W, H);
+
+var PAD = {top:14, right:12, bottom:34, left:56};
+var gW = W - PAD.left - PAD.right;
+var gH = H - PAD.top  - PAD.bottom;
+var labels   = cfg.data.labels   || [];
+var datasets = cfg.data.datasets || [];
+var type     = cfg.type || 'line';
+var n        = labels.length;
+
+// ── Y range ──
+var yMin = Infinity, yMax = -Infinity;
+if(type === 'bar'){
+  for(var i=0;i<n;i++){
+    var sum=0;
+    datasets.forEach(function(ds){ if(ds.type!=='line') sum+=(ds.data[i]||0); });
+    yMax = Math.max(yMax, sum);
+    datasets.forEach(function(ds){ if(ds.type==='line'){ yMax=Math.max(yMax,ds.data[i]||0); yMin=Math.min(yMin,ds.data[i]||0); } });
   }
-});
-if(type==='bar'){
-  // stacked: sum positives per index
-  const n = labels.length;
-  for(let i=0;i<n;i++){
-    let sum=0;
-    datasets.forEach(ds=>{ if(ds.type!=='line') sum+=ds.data[i]||0; });
-    yMax=Math.max(yMax,sum);
-    yMin=Math.min(yMin,0);
-    // include line datasets too
-    datasets.forEach(ds=>{ if(ds.type==='line'){ yMax=Math.max(yMax,ds.data[i]||0); yMin=Math.min(yMin,ds.data[i]||0); } });
-  }
+  yMin = Math.min(yMin, 0);
+} else {
+  datasets.forEach(function(ds){
+    (ds.data||[]).forEach(function(v){ if(v!=null){ yMin=Math.min(yMin,v); yMax=Math.max(yMax,v); } });
+  });
 }
-if(!isFinite(yMin)||!isFinite(yMax)){yMin=0;yMax=100;}
-if(yMax===yMin) yMax=yMin+1;
-// Nice round numbers
-const rawRange = yMax-yMin;
-const magnitude = Math.pow(10,Math.floor(Math.log10(rawRange)));
-const step = Math.ceil(rawRange/magnitude/5)*magnitude;
-yMax = Math.ceil(yMax/step)*step;
-yMin = Math.floor(yMin/step)*step;
+if(!isFinite(yMin)||!isFinite(yMax)){ yMin=0; yMax=1; }
+if(yMax === yMin) yMax = yMin + 1;
 
-const scaleY = v => PAD.top + gH - (v-yMin)/(yMax-yMin)*gH;
-const scaleX = (i,n) => PAD.left + (i+0.5)/n*gW;
+// Nice ticks
+var rawRange = yMax - yMin;
+var mag = Math.pow(10, Math.floor(Math.log10(rawRange)));
+var step = Math.ceil(rawRange / mag / 5) * mag;
+yMax = Math.ceil(yMax / step) * step;
+yMin = Math.floor(yMin / step) * step;
+if(yMax === yMin){ yMax = yMin + step; }
 
-// ── Grid + Y axis ──
-ctx.strokeStyle='rgba(0,0,0,0.07)';
-ctx.lineWidth=1;
-const nYTicks=5;
-ctx.fillStyle='#888';
-ctx.font=`${9*dpr/dpr}px sans-serif`;
-ctx.textAlign='right';
-for(let t=0;t<=nYTicks;t++){
-  const v=yMin+t*(yMax-yMin)/nYTicks;
-  const y=scaleY(v);
-  ctx.beginPath(); ctx.moveTo(PAD.left,y); ctx.lineTo(PAD.left+gW,y); ctx.stroke();
-  const label = v>=1000 ? Math.round(v/1000)+'k' : Math.round(v)+'';
-  ctx.fillText(label, PAD.left-4, y+3);
+function sy(v){ return PAD.top + gH - (v - yMin) / (yMax - yMin) * gH; }
+function sx(i){ return PAD.left + (i + 0.5) / n * gW; }
+
+// ── Grid + Y labels ──
+ctx.strokeStyle = 'rgba(0,0,0,0.07)';
+ctx.lineWidth = 1;
+ctx.fillStyle = '#888';
+ctx.font = '9px sans-serif';
+ctx.textAlign = 'right';
+var nTicks = 5;
+for(var t=0; t<=nTicks; t++){
+  var v  = yMin + t * (yMax - yMin) / nTicks;
+  var y0 = sy(v);
+  ctx.beginPath(); ctx.moveTo(PAD.left, y0); ctx.lineTo(PAD.left + gW, y0); ctx.stroke();
+  var lbl = Math.abs(v) >= 1000 ? (v/1000).toFixed(0)+'k' : Math.round(v)+'';
+  ctx.fillText(lbl, PAD.left - 3, y0 + 3);
 }
 
-// ── X axis labels ──
-ctx.textAlign='center';
-ctx.fillStyle='#666';
-const maxLabels = Math.floor(gW/32);
-const step2 = Math.max(1, Math.ceil(labels.length/maxLabels));
-labels.forEach((lb,i)=>{
-  if(i%step2!==0) return;
-  ctx.fillText(lb, scaleX(i,labels.length), H-PAD.bottom+14);
+// ── X labels ──
+ctx.textAlign = 'center';
+ctx.fillStyle = '#666';
+var maxL  = Math.max(1, Math.floor(gW / 28));
+var stepL = Math.max(1, Math.ceil(n / maxL));
+labels.forEach(function(lb, i){
+  if(i % stepL !== 0) return;
+  ctx.fillText(lb, sx(i), H - PAD.bottom + 12);
 });
 
-// ── Bar datasets (stacked) ──
-if(type==='bar'){
-  const barW = Math.max(2, gW/labels.length*0.7);
-  const baseYArr = new Array(labels.length).fill(scaleY(0));
-  datasets.filter(ds=>ds.type!=='line').forEach(ds=>{
-    ds.data.forEach((v,i)=>{
+// ── Bars ──
+if(type === 'bar'){
+  var barW   = Math.max(2, gW / n * 0.65);
+  var bases  = [];
+  for(var j=0;j<n;j++) bases.push(sy(0));
+
+  datasets.filter(function(ds){ return ds.type !== 'line'; }).forEach(function(ds){
+    ds.data.forEach(function(v, i){
       if(!v) return;
-      const x = scaleX(i,labels.length)-barW/2;
-      const yTop = scaleY((v||0)+((yMin<0?0:0)));
-      // stacked: draw from current base
-      const base = baseYArr[i];
-      const barH = base-scaleY(v);
-      if(barH>0){
-        ctx.fillStyle=ds.backgroundColor||ds.borderColor||'#888';
-        ctx.fillRect(x, base-barH, barW, barH);
-        baseYArr[i] = base-barH;
+      var x   = sx(i) - barW / 2;
+      var bH  = bases[i] - sy(v);
+      if(bH > 0){
+        ctx.fillStyle = ds.backgroundColor || '#888';
+        ctx.fillRect(x, bases[i] - bH, barW, bH);
+        bases[i] -= bH;
       }
     });
   });
 }
 
-// ── Line datasets ──
-const lineDs = type==='line' ? datasets : datasets.filter(ds=>ds.type==='line');
-lineDs.forEach(ds=>{
-  const data = ds.data||[];
+// ── Lines ──
+var lineDsets = type === 'line' ? datasets : datasets.filter(function(ds){ return ds.type === 'line'; });
+lineDsets.forEach(function(ds){
+  var data = ds.data || [];
   if(!data.length) return;
-  ctx.strokeStyle=ds.borderColor||'#333';
-  ctx.lineWidth=(ds.borderWidth||2);
-  if(ds.borderDash) ctx.setLineDash(ds.borderDash);
-  else ctx.setLineDash([]);
+  ctx.strokeStyle = ds.borderColor || '#333';
+  ctx.lineWidth   = ds.borderWidth || 2;
+  ctx.setLineDash(ds.borderDash || []);
   ctx.beginPath();
-  let started=false;
-  data.forEach((v,i)=>{
-    if(v==null) return;
-    const x=scaleX(i,data.length), y=scaleY(v);
-    if(!started){ctx.moveTo(x,y);started=true;}
-    else ctx.lineTo(x,y);
+  var started = false;
+  data.forEach(function(v, i){
+    if(v == null) return;
+    var x = sx(i), y = sy(v);
+    if(!started){ ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
   });
   ctx.stroke();
   ctx.setLineDash([]);
 
-  if(type==='line'&&!ds.fill&&ds.backgroundColor){
-    // fill area under line
-    ctx.fillStyle=ds.backgroundColor;
-    ctx.beginPath();
-    let fx=-1,lx=-1,firstY=0;
-    data.forEach((v,i)=>{
-      if(v==null) return;
-      const x=scaleX(i,data.length),y=scaleY(v);
-      if(fx<0){ctx.moveTo(x,scaleY(yMin));ctx.lineTo(x,y);fx=x;firstY=scaleY(yMin);}
-      else ctx.lineTo(x,y);
-      lx=x;
-    });
-    if(lx>0){ctx.lineTo(lx,scaleY(yMin));ctx.closePath();ctx.fill();}
-  }
-
   // dots
-  if(ds.pointRadius&&ds.pointRadius>0){
-    ctx.fillStyle=ds.borderColor||'#333';
-    data.forEach((v,i)=>{
-      if(v==null) return;
+  if(ds.pointRadius && ds.pointRadius > 0){
+    ctx.fillStyle = ds.borderColor || '#333';
+    data.forEach(function(v, i){
+      if(v == null) return;
       ctx.beginPath();
-      ctx.arc(scaleX(i,data.length),scaleY(v),ds.pointRadius,0,Math.PI*2);
+      ctx.arc(sx(i), sy(v), ds.pointRadius, 0, Math.PI*2);
       ctx.fill();
     });
   }
 });
 
 // ── Legend ──
-const allDs = datasets.filter(d=>d.label);
-let lx=PAD.left, ly=gH+PAD.top+24;
-ctx.font=`${9}px sans-serif`;
-ctx.textAlign='left';
-allDs.forEach((ds,i)=>{
-  const col=ds.borderColor||ds.backgroundColor||'#888';
-  const lbl=ds.label||'';
-  if(lx+lbl.length*6+20 > W-PAD.right){ lx=PAD.left; ly+=14; }
-  ctx.fillStyle=col;
-  ctx.fillRect(lx,ly-7,10,8);
-  ctx.fillStyle='#444';
-  ctx.fillText(lbl, lx+13, ly);
-  lx+=lbl.length*6+28;
+var lx = PAD.left, ly = H - 6;
+ctx.font      = '9px sans-serif';
+ctx.textAlign = 'left';
+datasets.filter(function(d){ return d.label; }).forEach(function(ds){
+  var col = ds.borderColor || ds.backgroundColor || '#888';
+  var lbl = ds.label || '';
+  var tw  = lbl.length * 5.5 + 16;
+  if(lx + tw > W - PAD.right){ lx = PAD.left; ly -= 12; }
+  ctx.fillStyle = col;
+  ctx.fillRect(lx, ly - 7, 9, 7);
+  ctx.fillStyle = '#444';
+  ctx.fillText(lbl, lx + 12, ly);
+  lx += tw;
 });
 ```
 
 };
 
-// Mimic Chart.js constructor interface
-function Chart(canvas, config){
-return new MiniChart(canvas, config);
+// Redraw all on scroll (for lazy render)
+window.addEventListener(‘scroll’, function(){
+instances.forEach(function(inst){
+if(inst._retries > 0 || inst.canvas.width < 10){
+requestAnimationFrame(function(){ inst._safeDraw(); });
 }
+});
+}, {passive:true});
+
+function Chart(canvas, config){ return new MiniChart(canvas, config); }
 Chart.prototype = MiniChart.prototype;
-return Chart;
-})();
-// Alias so existing code works unchanged
-window.Chart = window.MiniChart;
+global.MiniChart = MiniChart;
+global.Chart = Chart;
+
+})(window);
 </script>
 
 <style>
@@ -882,7 +893,8 @@ rows.push({
 
 renderSummary(rows,targetTWD);
 renderTable(rows,policies,FX);
-renderCharts(rows,policies,targetTWD,FX);
+// 稍微延遲讓 DOM layout 穩定後再畫圖
+setTimeout(function(){ renderCharts(rows,policies,targetTWD,FX); }, 50);
 }
 function renderSummary(rows,targetTWD){
 if(!document.getElementById(‘summaryStatusInput’).value.trim()){
@@ -996,7 +1008,7 @@ label:p.name,
 data:smoothSeries(rows.map(r=>Math.round(r.items[i]?.end||0))),
 borderColor:colors[i%colors.length][0],
 backgroundColor:colors[i%colors.length][1].replace(’.55’,’.10’),
-pointRadius:3,borderWidth:2,fill:true
+pointRadius:3,borderWidth:2
 }))},
 options:{…commonOpts}
 });
