@@ -1,295 +1,11 @@
-<html lang="zh-TW"><head>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <script>
-      (function() {
-        const originalConsole = window.console;
-        window.console = {
-          log: (...args) => {
-            originalConsole.log(...args);
-            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
-          },
-          error: (...args) => {
-            originalConsole.error(...args);
-            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
-          },
-          warn: (...args) => {
-            originalConsole.warn(...args);
-            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
-          }
-        };
+<!DOCTYPE html>
 
-        let requestId = 0;
-        let callbacksMap = new Map();
-        let streamControllers = new Map();
-        
-        window.claude = {
-          complete: (prompt) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
-            });
-          }
-        };
-
-        window.storage = {
-          get: (key, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageGet', id, key, shared }, '*');
-            });
-          },
-          set: (key, value, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageSet', id, key, value, shared }, '*');
-            });
-          },
-          delete: (key, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageDelete', id, key, shared }, '*');
-            });
-          },
-          list: (prefix, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageList', id, prefix, shared }, '*');
-            });
-          }
-        };
-
-        let pendingBlobs = new Map();
-        URL.createObjectURL = (blob) => {
-          // Store the blob and create an ID and URL for it
-          const blobId = `blob-${Date.now()}-${Math.random()}`;
-          pendingBlobs.set(blobId, blob);
-          return `blob-request://${blobId}`;
-        };
-
-        URL.revokeObjectURL = (url) => {
-          // Remove the blob from our store
-          const blobId = url.replace("blob-request://", "");
-          pendingBlobs.delete(blobId);
-        };
-
-        const getBlobFromURL = (url) => {
-          const blobId = url.replace("blob-request://", "");
-          return pendingBlobs.get(blobId);
-        };
-
-        // Override global fetch with streaming support
-        window.fetch = (url, init = {}) => {
-          return new Promise((resolve, reject) => {
-            const id = requestId++;
-            const channelId = `fetch-${id}-${Date.now()}`;
-            
-            callbacksMap.set(id, { 
-              resolve: (response) => {
-                // Create a ReadableStream for the response body
-                const stream = new ReadableStream({
-                  start(controller) {
-                    streamControllers.set(channelId, controller);
-                  },
-                  cancel() {
-                    streamControllers.delete(channelId);
-                  }
-                });
-                
-                // Create and return the Response with the stream
-                resolve(new Response(stream, {
-                  status: response.status,
-                  statusText: response.statusText,
-                  headers: response.headers
-                }));
-              },
-              reject,
-              channelId
-            });
-            
-            window.parent.postMessage({
-              type: 'proxyFetch',
-              id,
-              url,
-              init,
-              channelId
-            }, '*');
-          });
-        };
-
-        window.addEventListener('message', async (event) => {
-          if (event.data.type === 'takeScreenshot') {
-            const rootElement = document.getElementById('artifacts-component-root-html');
-            if (!rootElement) {
-              window.parent.postMessage({
-                type: 'screenshotError',
-                error: new Error('Root element not found'),
-              }, '*');
-            }
-            const screenshot = await htmlToImage.toPng(rootElement, {
-              imagePlaceholder:
-                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
-            });
-            window.parent.postMessage({
-              type: 'screenshotData',
-              data: screenshot,
-            }, '*');
-          } else if (event.data.type === 'claudeComplete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.completion);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'proxyFetchResponse') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-              callbacksMap.delete(event.data.id);
-            } else {
-              // Initial response with headers, status, etc.
-              callback.resolve({
-                status: event.data.status,
-                statusText: event.data.statusText,
-                headers: event.data.headers
-              });
-              // Don't delete the callback yet if streaming
-              if (!event.data.body) {
-                callbacksMap.delete(event.data.id);
-              }
-            }
-          } else if (event.data.type === 'proxyFetchStream') {
-            // Handle streaming data chunks
-            const controller = streamControllers.get(event.data.channelId);
-            if (controller) {
-              if (event.data.error) {
-                controller.error(new Error(event.data.error));
-                streamControllers.delete(event.data.channelId);
-              } else if (event.data.done) {
-                controller.close();
-                streamControllers.delete(event.data.channelId);
-                // Clean up the callback
-                const callback = Array.from(callbacksMap.entries()).find(
-                  ([_, value]) => value.channelId === event.data.channelId
-                );
-                if (callback) {
-                  callbacksMap.delete(callback[0]);
-                }
-              } else if (event.data.chunk) {
-                controller.enqueue(new Uint8Array(event.data.chunk));
-              }
-            }
-          } else if (event.data.type === 'storageGet') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageSet') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageDelete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageList') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          }
-        });
-
-        window.addEventListener('click', (event) => {
-          const isEl = event.target instanceof HTMLElement;
-          if (!isEl) return;
-    
-          // find ancestor links
-          const linkEl = event.target.closest("a");
-          if (!linkEl || !linkEl.href) return;
-    
-          event.preventDefault();
-          event.stopImmediatePropagation();
-    
-          if (linkEl.href.startsWith("blob-request:")) {
-            const blob = getBlobFromURL(linkEl.href);
-            if (!blob) return;
-            void blob.arrayBuffer().then((data) => {
-              window.parent.postMessage({
-                type: "downloadFile",
-                filename: linkEl.download,
-                data,
-                mimeType: blob.type || "application/octet-stream",
-              });
-            });
-          } else if (linkEl.href.startsWith("data:")) {
-            const [header, base64Data] = linkEl.href.split(",");
-            const mimeMatch = header.match(/data:([^;]+)/);
-            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
-            const binaryString = atob(base64Data);
-            const data = Uint8Array.from(binaryString, (c) =>
-              c.charCodeAt(0),
-            ).buffer;
-            window.parent.postMessage({
-              type: "downloadFile",
-              filename: linkEl.download,
-              data,
-              mimeType,
-            });
-          } else {
-            let linkUrl;
-            try {
-              linkUrl = new URL(linkEl.href);
-            } catch (error) {
-              return;
-            }
-    
-            if (linkUrl.hostname === window.location.hostname) return;
-      
-            window.parent.postMessage({
-              type: 'openExternal',
-              href: linkEl.href,
-            }, '*');
-          }
-      });
-
-        const originalOpen = window.open;
-        window.open = function (url) {
-          window.parent.postMessage({
-            type: "openExternal",
-            href: url,
-          }, "*");
-        };
-
-        window.addEventListener('error', (event) => {
-          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
-        });
-      })();
-    </script>
-  
+<html lang="zh-TW">
+<head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>多保單整合智能試算｜陳志強</title>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&amp;family=Noto+Sans+TC:wght@400;500;700;900&amp;family=DM+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=DM+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script>
 // ══════════════════════════════════════════════════════════
 // MiniChart — 純 Canvas，不依賴任何外部資源
@@ -315,7 +31,8 @@ window.MiniChart = (function(){
     const cfg = this.config;
     const canvas = this.canvas;
     const dpr = window.devicePixelRatio||1;
-    const W = canvas.parentElement.clientWidth||canvas.offsetWidth||300;
+    const parent = canvas.parentElement;
+    const W = Math.max(parent.getBoundingClientRect().width||0, parent.clientWidth||0, canvas.offsetWidth||0, 280);
     const H = 220;
     canvas.style.width = W+'px';
     canvas.style.height = H+'px';
@@ -325,164 +42,168 @@ window.MiniChart = (function(){
     ctx.scale(dpr,dpr);
     ctx.clearRect(0,0,W,H);
 
-    const PAD = {top:16, right:16, bottom:36, left:60};
-    const gW = W-PAD.left-PAD.right;
-    const gH = H-PAD.top-PAD.bottom;
-    const labels = cfg.data.labels||[];
-    const datasets = cfg.data.datasets||[];
-    const type = cfg.type||'line';
+```
+const PAD = {top:16, right:16, bottom:36, left:60};
+const gW = W-PAD.left-PAD.right;
+const gH = H-PAD.top-PAD.bottom;
+const labels = cfg.data.labels||[];
+const datasets = cfg.data.datasets||[];
+const type = cfg.type||'line';
 
-    // ── Compute value ranges ──
-    let yMin=Infinity, yMax=-Infinity;
-    datasets.forEach(ds=>{
-      if(ds.type==='line'||type==='line'){
-        (ds.data||[]).forEach(v=>{ if(v!=null){yMin=Math.min(yMin,v);yMax=Math.max(yMax,v);} });
-      }
-    });
-    if(type==='bar'){
-      // stacked: sum positives per index
-      const n = labels.length;
-      for(let i=0;i<n;i++){
-        let sum=0;
-        datasets.forEach(ds=>{ if(ds.type!=='line') sum+=ds.data[i]||0; });
-        yMax=Math.max(yMax,sum);
-        yMin=Math.min(yMin,0);
-        // include line datasets too
-        datasets.forEach(ds=>{ if(ds.type==='line'){ yMax=Math.max(yMax,ds.data[i]||0); yMin=Math.min(yMin,ds.data[i]||0); } });
-      }
-    }
-    if(!isFinite(yMin)||!isFinite(yMax)){yMin=0;yMax=100;}
-    if(yMax===yMin) yMax=yMin+1;
-    // Nice round numbers
-    const rawRange = yMax-yMin;
-    const magnitude = Math.pow(10,Math.floor(Math.log10(rawRange)));
-    const step = Math.ceil(rawRange/magnitude/5)*magnitude;
-    yMax = Math.ceil(yMax/step)*step;
-    yMin = Math.floor(yMin/step)*step;
-
-    const scaleY = v => PAD.top + gH - (v-yMin)/(yMax-yMin)*gH;
-    const scaleX = (i,n) => PAD.left + (i+0.5)/n*gW;
-
-    // ── Grid + Y axis ──
-    ctx.strokeStyle='rgba(0,0,0,0.07)';
-    ctx.lineWidth=1;
-    const nYTicks=5;
-    ctx.fillStyle='#888';
-    ctx.font=`${9*dpr/dpr}px sans-serif`;
-    ctx.textAlign='right';
-    for(let t=0;t<=nYTicks;t++){
-      const v=yMin+t*(yMax-yMin)/nYTicks;
-      const y=scaleY(v);
-      ctx.beginPath(); ctx.moveTo(PAD.left,y); ctx.lineTo(PAD.left+gW,y); ctx.stroke();
-      const label = v>=1000 ? Math.round(v/1000)+'k' : Math.round(v)+'';
-      ctx.fillText(label, PAD.left-4, y+3);
-    }
-
-    // ── X axis labels ──
-    ctx.textAlign='center';
-    ctx.fillStyle='#666';
-    const maxLabels = Math.floor(gW/32);
-    const step2 = Math.max(1, Math.ceil(labels.length/maxLabels));
-    labels.forEach((lb,i)=>{
-      if(i%step2!==0) return;
-      ctx.fillText(lb, scaleX(i,labels.length), H-PAD.bottom+14);
-    });
-
-    // ── Bar datasets (stacked) ──
-    if(type==='bar'){
-      const barW = Math.max(2, gW/labels.length*0.7);
-      const baseYArr = new Array(labels.length).fill(scaleY(0));
-      datasets.filter(ds=>ds.type!=='line').forEach(ds=>{
-        ds.data.forEach((v,i)=>{
-          if(!v) return;
-          const x = scaleX(i,labels.length)-barW/2;
-          const yTop = scaleY((v||0)+((yMin<0?0:0)));
-          // stacked: draw from current base
-          const base = baseYArr[i];
-          const barH = base-scaleY(v);
-          if(barH>0){
-            ctx.fillStyle=ds.backgroundColor||ds.borderColor||'#888';
-            ctx.fillRect(x, base-barH, barW, barH);
-            baseYArr[i] = base-barH;
-          }
-        });
-      });
-    }
-
-    // ── Line datasets ──
-    const lineDs = type==='line' ? datasets : datasets.filter(ds=>ds.type==='line');
-    lineDs.forEach(ds=>{
-      const data = ds.data||[];
-      if(!data.length) return;
-      ctx.strokeStyle=ds.borderColor||'#333';
-      ctx.lineWidth=(ds.borderWidth||2);
-      if(ds.borderDash) ctx.setLineDash(ds.borderDash);
-      else ctx.setLineDash([]);
-      ctx.beginPath();
-      let started=false;
-      data.forEach((v,i)=>{
-        if(v==null) return;
-        const x=scaleX(i,data.length), y=scaleY(v);
-        if(!started){ctx.moveTo(x,y);started=true;}
-        else ctx.lineTo(x,y);
-      });
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      if(type==='line'&&!ds.fill&&ds.backgroundColor){
-        // fill area under line
-        ctx.fillStyle=ds.backgroundColor;
-        ctx.beginPath();
-        let fx=-1,lx=-1,firstY=0;
-        data.forEach((v,i)=>{
-          if(v==null) return;
-          const x=scaleX(i,data.length),y=scaleY(v);
-          if(fx<0){ctx.moveTo(x,scaleY(yMin));ctx.lineTo(x,y);fx=x;firstY=scaleY(yMin);}
-          else ctx.lineTo(x,y);
-          lx=x;
-        });
-        if(lx>0){ctx.lineTo(lx,scaleY(yMin));ctx.closePath();ctx.fill();}
-      }
-
-      // dots
-      if(ds.pointRadius&&ds.pointRadius>0){
-        ctx.fillStyle=ds.borderColor||'#333';
-        data.forEach((v,i)=>{
-          if(v==null) return;
-          ctx.beginPath();
-          ctx.arc(scaleX(i,data.length),scaleY(v),ds.pointRadius,0,Math.PI*2);
-          ctx.fill();
-        });
-      }
-    });
-
-    // ── Legend ──
-    const allDs = datasets.filter(d=>d.label);
-    let lx=PAD.left, ly=gH+PAD.top+24;
-    ctx.font=`${9}px sans-serif`;
-    ctx.textAlign='left';
-    allDs.forEach((ds,i)=>{
-      const col=ds.borderColor||ds.backgroundColor||'#888';
-      const lbl=ds.label||'';
-      if(lx+lbl.length*6+20 > W-PAD.right){ lx=PAD.left; ly+=14; }
-      ctx.fillStyle=col;
-      ctx.fillRect(lx,ly-7,10,8);
-      ctx.fillStyle='#444';
-      ctx.fillText(lbl, lx+13, ly);
-      lx+=lbl.length*6+28;
-    });
-  };
-
-  // Mimic Chart.js constructor interface
-  function Chart(canvas, config){
-    return new MiniChart(canvas, config);
+// ── Compute value ranges ──
+let yMin=Infinity, yMax=-Infinity;
+datasets.forEach(ds=>{
+  if(ds.type==='line'||type==='line'){
+    (ds.data||[]).forEach(v=>{ if(v!=null){yMin=Math.min(yMin,v);yMax=Math.max(yMax,v);} });
   }
-  Chart.prototype = MiniChart.prototype;
-  return Chart;
+});
+if(type==='bar'){
+  // stacked: sum positives per index
+  const n = labels.length;
+  for(let i=0;i<n;i++){
+    let sum=0;
+    datasets.forEach(ds=>{ if(ds.type!=='line') sum+=ds.data[i]||0; });
+    yMax=Math.max(yMax,sum);
+    yMin=Math.min(yMin,0);
+    // include line datasets too
+    datasets.forEach(ds=>{ if(ds.type==='line'){ yMax=Math.max(yMax,ds.data[i]||0); yMin=Math.min(yMin,ds.data[i]||0); } });
+  }
+}
+if(!isFinite(yMin)||!isFinite(yMax)){yMin=0;yMax=100;}
+if(yMax===yMin) yMax=yMin+1;
+// Nice round numbers
+const rawRange = yMax-yMin;
+const magnitude = Math.pow(10,Math.floor(Math.log10(rawRange)));
+const step = Math.ceil(rawRange/magnitude/5)*magnitude;
+yMax = Math.ceil(yMax/step)*step;
+yMin = Math.floor(yMin/step)*step;
+
+const scaleY = v => PAD.top + gH - (v-yMin)/(yMax-yMin)*gH;
+const scaleX = (i,n) => PAD.left + (i+0.5)/n*gW;
+
+// ── Grid + Y axis ──
+ctx.strokeStyle='rgba(0,0,0,0.07)';
+ctx.lineWidth=1;
+const nYTicks=5;
+ctx.fillStyle='#888';
+ctx.font=`${9*dpr/dpr}px sans-serif`;
+ctx.textAlign='right';
+for(let t=0;t<=nYTicks;t++){
+  const v=yMin+t*(yMax-yMin)/nYTicks;
+  const y=scaleY(v);
+  ctx.beginPath(); ctx.moveTo(PAD.left,y); ctx.lineTo(PAD.left+gW,y); ctx.stroke();
+  const label = v>=1000 ? Math.round(v/1000)+'k' : Math.round(v)+'';
+  ctx.fillText(label, PAD.left-4, y+3);
+}
+
+// ── X axis labels ──
+ctx.textAlign='center';
+ctx.fillStyle='#666';
+const maxLabels = Math.floor(gW/32);
+const step2 = Math.max(1, Math.ceil(labels.length/maxLabels));
+labels.forEach((lb,i)=>{
+  if(i%step2!==0) return;
+  ctx.fillText(lb, scaleX(i,labels.length), H-PAD.bottom+14);
+});
+
+// ── Bar datasets (stacked) ──
+if(type==='bar'){
+  const barW = Math.max(2, gW/labels.length*0.7);
+  const baseYArr = new Array(labels.length).fill(scaleY(0));
+  datasets.filter(ds=>ds.type!=='line').forEach(ds=>{
+    ds.data.forEach((v,i)=>{
+      if(!v) return;
+      const x = scaleX(i,labels.length)-barW/2;
+      const yTop = scaleY((v||0)+((yMin<0?0:0)));
+      // stacked: draw from current base
+      const base = baseYArr[i];
+      const barH = base-scaleY(v);
+      if(barH>0){
+        ctx.fillStyle=ds.backgroundColor||ds.borderColor||'#888';
+        ctx.fillRect(x, base-barH, barW, barH);
+        baseYArr[i] = base-barH;
+      }
+    });
+  });
+}
+
+// ── Line datasets ──
+const lineDs = type==='line' ? datasets : datasets.filter(ds=>ds.type==='line');
+lineDs.forEach(ds=>{
+  const data = ds.data||[];
+  if(!data.length) return;
+  ctx.strokeStyle=ds.borderColor||'#333';
+  ctx.lineWidth=(ds.borderWidth||2);
+  if(ds.borderDash) ctx.setLineDash(ds.borderDash);
+  else ctx.setLineDash([]);
+  ctx.beginPath();
+  let started=false;
+  data.forEach((v,i)=>{
+    if(v==null) return;
+    const x=scaleX(i,data.length), y=scaleY(v);
+    if(!started){ctx.moveTo(x,y);started=true;}
+    else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if(type==='line'&&!ds.fill&&ds.backgroundColor){
+    // fill area under line
+    ctx.fillStyle=ds.backgroundColor;
+    ctx.beginPath();
+    let fx=-1,lx=-1,firstY=0;
+    data.forEach((v,i)=>{
+      if(v==null) return;
+      const x=scaleX(i,data.length),y=scaleY(v);
+      if(fx<0){ctx.moveTo(x,scaleY(yMin));ctx.lineTo(x,y);fx=x;firstY=scaleY(yMin);}
+      else ctx.lineTo(x,y);
+      lx=x;
+    });
+    if(lx>0){ctx.lineTo(lx,scaleY(yMin));ctx.closePath();ctx.fill();}
+  }
+
+  // dots
+  if(ds.pointRadius&&ds.pointRadius>0){
+    ctx.fillStyle=ds.borderColor||'#333';
+    data.forEach((v,i)=>{
+      if(v==null) return;
+      ctx.beginPath();
+      ctx.arc(scaleX(i,data.length),scaleY(v),ds.pointRadius,0,Math.PI*2);
+      ctx.fill();
+    });
+  }
+});
+
+// ── Legend ──
+const allDs = datasets.filter(d=>d.label);
+let lx=PAD.left, ly=gH+PAD.top+24;
+ctx.font=`${9}px sans-serif`;
+ctx.textAlign='left';
+allDs.forEach((ds,i)=>{
+  const col=ds.borderColor||ds.backgroundColor||'#888';
+  const lbl=ds.label||'';
+  if(lx+lbl.length*6+20 > W-PAD.right){ lx=PAD.left; ly+=14; }
+  ctx.fillStyle=col;
+  ctx.fillRect(lx,ly-7,10,8);
+  ctx.fillStyle='#444';
+  ctx.fillText(lbl, lx+13, ly);
+  lx+=lbl.length*6+28;
+});
+```
+
+};
+
+// Mimic Chart.js constructor interface
+function Chart(canvas, config){
+return new MiniChart(canvas, config);
+}
+Chart.prototype = MiniChart.prototype;
+return Chart;
 })();
 // Alias so existing code works unchanged
 window.Chart = window.MiniChart;
 </script>
+
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -611,25 +332,30 @@ td.total-start, th.total-start{border-left:3px solid var(--ink)!important}
 .ratio-row.auto-fill label{color:var(--warn)}
 td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);font-weight:700}
 </style>
+
 </head>
-<body id="artifacts-component-root-html">
+<body>
 <div class="page" id="page">
 
 <div class="hdr">
   <div>
-    <h1>多保單整合智能試算<br><em id="titleName">陳志強</em></h1>
+    <h1>多保單整合智能試算<br><em id="titleName">客製報告</em></h1>
   </div>
   <div class="hdr-r">
-    製表：<span id="today">2026/04/30</span><br>
-    <strong id="clientMeta">現齡 65 歲｜多保單現金流規劃</strong><br>
+    製表：<span id="today"></span><br>
+    <strong id="clientMeta">客戶資料可切換</strong><br>
     <span id="modeText">顧問模式</span>
   </div>
 </div>
 
-
+<div style="background:#e8f4ef;border:1.5px solid #7ecfba;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:11.5px;line-height:1.9;color:#1a3a30">
+  <strong style="font-size:12px">🌐 GitHub Pages 部署說明：</strong><br>
+  在 GitHub 建立 repo → 上傳此 HTML 檔案並命名為 <code style="background:#fff;padding:1px 5px;border-radius:3px">index.html</code> → Settings → Pages → Branch: main → Save。
+  圖表若空白：在 repo 根目錄新增 <code style="background:#fff;padding:1px 5px;border-radius:3px">_config.yml</code>，內容填 <code style="background:#fff;padding:1px 5px;border-radius:3px">plugins: []</code> 即可解決 Jekyll 干擾。
+</div>
 <div class="panel" style="padding:12px 18px;margin-bottom:18px">
   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-    <button class="btn-small" onclick="saveAsJson()" style="background:var(--A)">💾 匯出設定檔 (.json)</button>
+    <button class="btn-small" onclick="saveAsJson()" style="background:var(--A)">💾 匯出設定檔</button>
     <label class="btn-small" style="background:var(--B);cursor:pointer;display:inline-block">
       📂 讀取設定檔 (.json)
       <input type="file" accept=".json,application/json" onchange="loadFromJson(event)" style="display:none">
@@ -657,6 +383,7 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
     <div class="sg G">
       <h4>提領設定</h4>
       <div class="f"><label>年領目標 (TWD)</label><input id="targetTWD" type="number" value="400000" step="5000"></div>
+      <div class="f"><label>定期提領起始年（前幾年只用單筆）</label><input id="regularStartYear" type="number" value="1" min="1" max="30" title="例如填3，代表第1-2年不做定期提領，第3年起才每年提領目標金額"></div>
       <div class="f"><label>試算年數</label><input id="years" type="number" value="20" min="1" max="30" onchange="rebuildAllRatioGrids();recalc()"></div>
     </div>
     <div class="sg G">
@@ -667,8 +394,11 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
     <div class="sg P">
       <h4>操作</h4>
       <div class="f"><label>報告模式</label><select id="reportMode"><option value="advisor">顧問試算</option><option value="client">客戶展示</option></select></div>
-      
-    </div>
+
+```
+</div>
+```
+
   </div>
   <div class="btn-row">
     <button class="btn-calc" onclick="recalc()">▶ 重新試算</button>
@@ -679,427 +409,7 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
 
 <div class="relay-panel edit-only">
   <div class="panel-title purple">📄 保單資料輸入（可新增 / 刪除 / 固定表 / 利率推估）</div>
-  <div id="policyList" class="policy-list"><div class="policy-card tone0 use-table" id="policy_0">
-    <div class="policy-head">
-      <div>
-        <h4 id="policyTitle_0">金價美 FDD</h4>
-        <small id="policySub_0">全球人壽 7001355710</small>
-      </div>
-      <button class="btn-del" onclick="removePolicy(0)">刪除</button>
-    </div>
-    <div class="policy-grid">
-      <div>
-        <div class="f"><label>保單名稱</label><input id="p_name_0" value="金價美 FDD" oninput="updatePolicyTitle(0)"></div>
-        <div class="f"><label>保險公司</label><input id="p_company_0" value="全球人壽" oninput="updatePolicyTitle(0)"></div>
-        <div class="f"><label>保單號碼</label><input id="p_no_0" value="7001355710" oninput="updatePolicyTitle(0)"></div>
-      </div>
-      <div>
-        <div class="f"><label>目前本金 / 解約金 USD</label><input id="p_start_0" type="number" value="512039"></div>
-        <div class="f"><label>利率 / 後段增值率 %</label><input id="p_rate_0" type="number" value="2.8" step="0.05"></div>
-        <div class="f"><label>本金下限 USD</label><input id="p_floor_0" type="number" value="0"></div>
-      </div>
-      <div>
-        <div class="f"><label>計算模式</label>
-          <select id="p_mode_0" onchange="toggleFixed(0)">
-            <option value="rate">利率推估（不使用官方表）</option>
-            <option value="table">官方解約金表（完全照表）</option>
-            <option value="hybrid" selected="">官方表＋後段利率</option>
-          </select>
-        </div>
-        <div class="f"><label>開始承接年</label><input id="p_startYear_0" type="number" value="1" min="1"></div>
-        <div class="f"><label>提領順位</label><input id="p_priority_0" type="number" value="1" min="1"></div>
-      </div>
-      <div>
-        <div class="f"><label>是否可動本金</label>
-          <select id="p_canPrincipal_0">
-            <option value="1" selected="">可動本金</option>
-            <option value="0">只領利息 / 增值</option>
-          </select>
-        </div>
-        <div class="f"><label>本金動用上限 USD（0=不限）</label><input id="p_cap_0" type="number" value="0"></div>
-        <div class="fixed-box" id="fixedBox_0">
-          <div class="f"><label>官方解約金 / 期初本金表（每年期初值；貼上官方表即可）</label><textarea id="p_fixed_0">512039,515024,517960,520874,523759,526612,529426,532136,534804,537426,540001,542527,545011,547441,549813,552123</textarea></div>
-          <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_0">0,0,0,0,12361,12739,13127,13937,14791,15691,16159,16638,17129,17632,18149,18679</textarea></div>
-        </div>
-        <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
-      </div>
-    </div>
-    <div class="ratio-section">
-      <div class="ratio-section-title">
-        📊 每年提領比例設定
-        <div class="ratio-mode-toggle">
-          <label><input type="radio" name="ratio_mode_0" value="priority" checked="" onchange="toggleRatioMode(0)"> 順位制（依順位填滿）</label>
-          <label><input type="radio" name="ratio_mode_0" value="ratio" onchange="toggleRatioMode(0)"> 比例制（每年自訂 %）</label>
-        </div>
-      </div>
-      <div id="ratioBox_0" style="display:none">
-        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
-          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
-        </div>
-        <div class="ratio-grid" id="ratioGrid_0"><div class="ratio-row" data-yr="1"><label>第1年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="2"><label>第2年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="3"><label>第3年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="4"><label>第4年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="5"><label>第5年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="6"><label>第6年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="7"><label>第7年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="8"><label>第8年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="9"><label>第9年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="10"><label>第10年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="11"><label>第11年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="12"><label>第12年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="13"><label>第13年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="14"><label>第14年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="15"><label>第15年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="16"><label>第16年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="17"><label>第17年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="18"><label>第18年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="19"><label>第19年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="20"><label>第20年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div></div>
-        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(0)">平均分配重填</button>
-      </div>
-    </div></div><div class="policy-card tone1 use-table" id="policy_1">
-    <div class="policy-head">
-      <div>
-        <h4 id="policyTitle_1">非常美 FGD</h4>
-        <small id="policySub_1">全球人壽 88000792170</small>
-      </div>
-      <button class="btn-del" onclick="removePolicy(1)">刪除</button>
-    </div>
-    <div class="policy-grid">
-      <div>
-        <div class="f"><label>保單名稱</label><input id="p_name_1" value="非常美 FGD" oninput="updatePolicyTitle(1)"></div>
-        <div class="f"><label>保險公司</label><input id="p_company_1" value="全球人壽" oninput="updatePolicyTitle(1)"></div>
-        <div class="f"><label>保單號碼</label><input id="p_no_1" value="88000792170" oninput="updatePolicyTitle(1)"></div>
-      </div>
-      <div>
-        <div class="f"><label>目前本金 / 解約金 USD</label><input id="p_start_1" type="number" value="89653"></div>
-        <div class="f"><label>利率 / 後段增值率 %</label><input id="p_rate_1" type="number" value="4.2" step="0.05"></div>
-        <div class="f"><label>本金下限 USD</label><input id="p_floor_1" type="number" value="0"></div>
-      </div>
-      <div>
-        <div class="f"><label>計算模式</label>
-          <select id="p_mode_1" onchange="toggleFixed(1)">
-            <option value="rate">利率推估（不使用官方表）</option>
-            <option value="table">官方解約金表（完全照表）</option>
-            <option value="hybrid" selected="">官方表＋後段利率</option>
-          </select>
-        </div>
-        <div class="f"><label>開始承接年</label><input id="p_startYear_1" type="number" value="4" min="1"></div>
-        <div class="f"><label>提領順位</label><input id="p_priority_1" type="number" value="2" min="1"></div>
-      </div>
-      <div>
-        <div class="f"><label>是否可動本金</label>
-          <select id="p_canPrincipal_1">
-            <option value="1" selected="">可動本金</option>
-            <option value="0">只領利息 / 增值</option>
-          </select>
-        </div>
-        <div class="f"><label>本金動用上限 USD（0=不限）</label><input id="p_cap_1" type="number" value="0"></div>
-        <div class="fixed-box" id="fixedBox_1">
-          <div class="f"><label>官方解約金 / 期初本金表（每年期初值；貼上官方表即可）</label><textarea id="p_fixed_1">89653,96731,98025,99343,100684,102030,103367,104795,106266,107787,110000,112513,114120,116402,117380,119031,120694,122368,124053,125747</textarea></div>
-          <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_1">0,0,0,0,0,0,2595,2700,2809,2923,3043,3165,3208,3252,3299,3346,3395,3443</textarea></div>
-        </div>
-        <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
-      </div>
-    </div>
-    <div class="ratio-section">
-      <div class="ratio-section-title">
-        📊 每年提領比例設定
-        <div class="ratio-mode-toggle">
-          <label><input type="radio" name="ratio_mode_1" value="priority" checked="" onchange="toggleRatioMode(1)"> 順位制（依順位填滿）</label>
-          <label><input type="radio" name="ratio_mode_1" value="ratio" onchange="toggleRatioMode(1)"> 比例制（每年自訂 %）</label>
-        </div>
-      </div>
-      <div id="ratioBox_1" style="display:none">
-        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
-          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
-        </div>
-        <div class="ratio-grid" id="ratioGrid_1"><div class="ratio-row" data-yr="1"><label>第1年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="2"><label>第2年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="3"><label>第3年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="4"><label>第4年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="5"><label>第5年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="6"><label>第6年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="7"><label>第7年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="8"><label>第8年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="9"><label>第9年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="10"><label>第10年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="11"><label>第11年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="12"><label>第12年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="13"><label>第13年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="14"><label>第14年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="15"><label>第15年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="16"><label>第16年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="17"><label>第17年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="18"><label>第18年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="19"><label>第19年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="20"><label>第20年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div></div>
-        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(1)">平均分配重填</button>
-      </div>
-    </div></div><div class="policy-card tone2 use-table" id="policy_2">
-    <div class="policy-head">
-      <div>
-        <h4 id="policyTitle_2">萬事利達(陳怡亘)</h4>
-        <small id="policySub_2">保誠人壽 81224035</small>
-      </div>
-      <button class="btn-del" onclick="removePolicy(2)">刪除</button>
-    </div>
-    <div class="policy-grid">
-      <div>
-        <div class="f"><label>保單名稱</label><input id="p_name_2" value="萬事利達(陳怡亘)" oninput="updatePolicyTitle(2)"></div>
-        <div class="f"><label>保險公司</label><input id="p_company_2" value="保誠人壽" oninput="updatePolicyTitle(2)"></div>
-        <div class="f"><label>保單號碼</label><input id="p_no_2" value="81224035" oninput="updatePolicyTitle(2)"></div>
-      </div>
-      <div>
-        <div class="f"><label>目前本金 / 解約金 USD</label><input id="p_start_2" type="number" value="35200"></div>
-        <div class="f"><label>利率 / 後段增值率 %</label><input id="p_rate_2" type="number" value="3.2" step="0.05"></div>
-        <div class="f"><label>本金下限 USD</label><input id="p_floor_2" type="number" value="0"></div>
-      </div>
-      <div>
-        <div class="f"><label>計算模式</label>
-          <select id="p_mode_2" onchange="toggleFixed(2)">
-            <option value="rate">利率推估（不使用官方表）</option>
-            <option value="table">官方解約金表（完全照表）</option>
-            <option value="hybrid" selected="">官方表＋後段利率</option>
-          </select>
-        </div>
-        <div class="f"><label>開始承接年</label><input id="p_startYear_2" type="number" value="5" min="1"></div>
-        <div class="f"><label>提領順位</label><input id="p_priority_2" type="number" value="3" min="1"></div>
-      </div>
-      <div>
-        <div class="f"><label>是否可動本金</label>
-          <select id="p_canPrincipal_2">
-            <option value="1" selected="">可動本金</option>
-            <option value="0">只領利息 / 增值</option>
-          </select>
-        </div>
-        <div class="f"><label>本金動用上限 USD（0=不限）</label><input id="p_cap_2" type="number" value="0"></div>
-        <div class="fixed-box" id="fixedBox_2">
-          <div class="f"><label>官方解約金 / 期初本金表（每年期初值；貼上官方表即可）</label><textarea id="p_fixed_2">35200,48435,63078,66074,73117,76317,141051,147617,153645,159842,165523,170938,176092,180987,185657,190100,194317,199906,205369,210406,215179,219574,223962,227983,231790,235476,238842,242719,249978,253222</textarea></div>
-          <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_2">0,13235,14643,2996,7043,3200,64734,6566,6028,6197,5681,5415,5154,4895,4670,4443,4217,5589,5463,5037,4773,4395,4388,4021,3807,3686,3366,3877,7259,3244</textarea></div>
-        </div>
-        <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
-      </div>
-    </div>
-    <div class="ratio-section">
-      <div class="ratio-section-title">
-        📊 每年提領比例設定
-        <div class="ratio-mode-toggle">
-          <label><input type="radio" name="ratio_mode_2" value="priority" checked="" onchange="toggleRatioMode(2)"> 順位制（依順位填滿）</label>
-          <label><input type="radio" name="ratio_mode_2" value="ratio" onchange="toggleRatioMode(2)"> 比例制（每年自訂 %）</label>
-        </div>
-      </div>
-      <div id="ratioBox_2" style="display:none">
-        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
-          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
-        </div>
-        <div class="ratio-grid" id="ratioGrid_2"><div class="ratio-row" data-yr="1"><label>第1年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="2"><label>第2年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="3"><label>第3年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="4"><label>第4年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="5"><label>第5年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="6"><label>第6年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="7"><label>第7年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="8"><label>第8年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="9"><label>第9年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="10"><label>第10年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="11"><label>第11年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="12"><label>第12年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="13"><label>第13年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="14"><label>第14年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="15"><label>第15年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="16"><label>第16年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="17"><label>第17年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="18"><label>第18年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="19"><label>第19年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="20"><label>第20年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div></div>
-        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(2)">平均分配重填</button>
-      </div>
-    </div></div><div class="policy-card tone3 use-table" id="policy_3">
-    <div class="policy-head">
-      <div>
-        <h4 id="policyTitle_3">萬事利達(陳韋庭)</h4>
-        <small id="policySub_3">保誠人壽 81215039</small>
-      </div>
-      <button class="btn-del" onclick="removePolicy(3)">刪除</button>
-    </div>
-    <div class="policy-grid">
-      <div>
-        <div class="f"><label>保單名稱</label><input id="p_name_3" value="萬事利達(陳韋庭)" oninput="updatePolicyTitle(3)"></div>
-        <div class="f"><label>保險公司</label><input id="p_company_3" value="保誠人壽" oninput="updatePolicyTitle(3)"></div>
-        <div class="f"><label>保單號碼</label><input id="p_no_3" value="81215039" oninput="updatePolicyTitle(3)"></div>
-      </div>
-      <div>
-        <div class="f"><label>目前本金 / 解約金 USD</label><input id="p_start_3" type="number" value="34800"></div>
-        <div class="f"><label>利率 / 後段增值率 %</label><input id="p_rate_3" type="number" value="3.2" step="0.05"></div>
-        <div class="f"><label>本金下限 USD</label><input id="p_floor_3" type="number" value="0"></div>
-      </div>
-      <div>
-        <div class="f"><label>計算模式</label>
-          <select id="p_mode_3" onchange="toggleFixed(3)">
-            <option value="rate">利率推估（不使用官方表）</option>
-            <option value="table">官方解約金表（完全照表）</option>
-            <option value="hybrid" selected="">官方表＋後段利率</option>
-          </select>
-        </div>
-        <div class="f"><label>開始承接年</label><input id="p_startYear_3" type="number" value="6" min="1"></div>
-        <div class="f"><label>提領順位</label><input id="p_priority_3" type="number" value="4" min="1"></div>
-      </div>
-      <div>
-        <div class="f"><label>是否可動本金</label>
-          <select id="p_canPrincipal_3">
-            <option value="1" selected="">可動本金</option>
-            <option value="0">只領利息 / 增值</option>
-          </select>
-        </div>
-        <div class="f"><label>本金動用上限 USD（0=不限）</label><input id="p_cap_3" type="number" value="0"></div>
-        <div class="fixed-box" id="fixedBox_3">
-          <div class="f"><label>官方解約金 / 期初本金表（每年期初值；貼上官方表即可）</label><textarea id="p_fixed_3">34800,47850,62650,65364,71958,75468,137648,142726,147334,151802,156134,159926,163696,196979,170193,173140,175917,17388,200225,209573,214009,218090</textarea></div>
-          <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_3">0,13050,14800,2714,6594,3510,62180,5078,4608,4468,4332,3792,3770,33283,0,2947,2777,0,182837,9348,4436,4081</textarea></div>
-        </div>
-        <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
-      </div>
-    </div>
-    <div class="ratio-section">
-      <div class="ratio-section-title">
-        📊 每年提領比例設定
-        <div class="ratio-mode-toggle">
-          <label><input type="radio" name="ratio_mode_3" value="priority" checked="" onchange="toggleRatioMode(3)"> 順位制（依順位填滿）</label>
-          <label><input type="radio" name="ratio_mode_3" value="ratio" onchange="toggleRatioMode(3)"> 比例制（每年自訂 %）</label>
-        </div>
-      </div>
-      <div id="ratioBox_3" style="display:none">
-        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
-          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
-        </div>
-        <div class="ratio-grid" id="ratioGrid_3"><div class="ratio-row" data-yr="1"><label>第1年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="2"><label>第2年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="3"><label>第3年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="4"><label>第4年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="5"><label>第5年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="6"><label>第6年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="7"><label>第7年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="8"><label>第8年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="9"><label>第9年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="10"><label>第10年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="11"><label>第11年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="12"><label>第12年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="13"><label>第13年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="14"><label>第14年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="15"><label>第15年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="16"><label>第16年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="17"><label>第17年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="18"><label>第18年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="19"><label>第19年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="20"><label>第20年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div></div>
-        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(3)">平均分配重填</button>
-      </div>
-    </div></div><div class="policy-card tone0 use-table" id="policy_4">
-    <div class="policy-head">
-      <div>
-        <h4 id="policyTitle_4">萬事利達(陳加綺)</h4>
-        <small id="policySub_4">保誠人壽 81224053</small>
-      </div>
-      <button class="btn-del" onclick="removePolicy(4)">刪除</button>
-    </div>
-    <div class="policy-grid">
-      <div>
-        <div class="f"><label>保單名稱</label><input id="p_name_4" value="萬事利達(陳加綺)" oninput="updatePolicyTitle(4)"></div>
-        <div class="f"><label>保險公司</label><input id="p_company_4" value="保誠人壽" oninput="updatePolicyTitle(4)"></div>
-        <div class="f"><label>保單號碼</label><input id="p_no_4" value="81224053" oninput="updatePolicyTitle(4)"></div>
-      </div>
-      <div>
-        <div class="f"><label>目前本金 / 解約金 USD</label><input id="p_start_4" type="number" value="36020"></div>
-        <div class="f"><label>利率 / 後段增值率 %</label><input id="p_rate_4" type="number" value="3.2" step="0.05"></div>
-        <div class="f"><label>本金下限 USD</label><input id="p_floor_4" type="number" value="0"></div>
-      </div>
-      <div>
-        <div class="f"><label>計算模式</label>
-          <select id="p_mode_4" onchange="toggleFixed(4)">
-            <option value="rate">利率推估（不使用官方表）</option>
-            <option value="table">官方解約金表（完全照表）</option>
-            <option value="hybrid" selected="">官方表＋後段利率</option>
-          </select>
-        </div>
-        <div class="f"><label>開始承接年</label><input id="p_startYear_4" type="number" value="7" min="1"></div>
-        <div class="f"><label>提領順位</label><input id="p_priority_4" type="number" value="5" min="1"></div>
-      </div>
-      <div>
-        <div class="f"><label>是否可動本金</label>
-          <select id="p_canPrincipal_4">
-            <option value="1" selected="">可動本金</option>
-            <option value="0">只領利息 / 增值</option>
-          </select>
-        </div>
-        <div class="f"><label>本金動用上限 USD（0=不限）</label><input id="p_cap_4" type="number" value="0"></div>
-        <div class="fixed-box" id="fixedBox_4">
-          <div class="f"><label>官方解約金 / 期初本金表（每年期初值；貼上官方表即可）</label><textarea id="p_fixed_4">36020,67120,74414,77470,143208,149938,156260,162457,168266,176760,179213,184025,188595,193043,197390,202732,207652,212455,216871,220969,224752,228290,231462,234449,237283,240147,242785,245168,247280,249144</textarea></div>
-          <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_4">0,31100,7294,3056,65738,6730,6322,6197,5809,8494,2453,4812,4570,4448,4347,5342,4920,4803,4416,4098,3783,3538,3172,2987,2834,2864,2638,2383,2112,1864</textarea></div>
-        </div>
-        <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
-      </div>
-    </div>
-    <div class="ratio-section">
-      <div class="ratio-section-title">
-        📊 每年提領比例設定
-        <div class="ratio-mode-toggle">
-          <label><input type="radio" name="ratio_mode_4" value="priority" checked="" onchange="toggleRatioMode(4)"> 順位制（依順位填滿）</label>
-          <label><input type="radio" name="ratio_mode_4" value="ratio" onchange="toggleRatioMode(4)"> 比例制（每年自訂 %）</label>
-        </div>
-      </div>
-      <div id="ratioBox_4" style="display:none">
-        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
-          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
-        </div>
-        <div class="ratio-grid" id="ratioGrid_4"><div class="ratio-row" data-yr="1"><label>第1年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="2"><label>第2年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="3"><label>第3年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="4"><label>第4年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="5"><label>第5年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="6"><label>第6年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="7"><label>第7年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="8"><label>第8年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="9"><label>第9年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="10"><label>第10年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="11"><label>第11年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="12"><label>第12年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="13"><label>第13年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="14"><label>第14年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="15"><label>第15年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="16"><label>第16年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="17"><label>第17年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="18"><label>第18年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="19"><label>第19年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="20"><label>第20年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div></div>
-        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(4)">平均分配重填</button>
-      </div>
-    </div></div><div class="policy-card tone1 use-table" id="policy_5">
-    <div class="policy-head">
-      <div>
-        <h4 id="policyTitle_5">萬事利達(陳志強本人)</h4>
-        <small id="policySub_5">保誠人壽 81215001</small>
-      </div>
-      <button class="btn-del" onclick="removePolicy(5)">刪除</button>
-    </div>
-    <div class="policy-grid">
-      <div>
-        <div class="f"><label>保單名稱</label><input id="p_name_5" value="萬事利達(陳志強本人)" oninput="updatePolicyTitle(5)"></div>
-        <div class="f"><label>保險公司</label><input id="p_company_5" value="保誠人壽" oninput="updatePolicyTitle(5)"></div>
-        <div class="f"><label>保單號碼</label><input id="p_no_5" value="81215001" oninput="updatePolicyTitle(5)"></div>
-      </div>
-      <div>
-        <div class="f"><label>目前本金 / 解約金 USD</label><input id="p_start_5" type="number" value="23598"></div>
-        <div class="f"><label>利率 / 後段增值率 %</label><input id="p_rate_5" type="number" value="3" step="0.05"></div>
-        <div class="f"><label>本金下限 USD</label><input id="p_floor_5" type="number" value="0"></div>
-      </div>
-      <div>
-        <div class="f"><label>計算模式</label>
-          <select id="p_mode_5" onchange="toggleFixed(5)">
-            <option value="rate">利率推估（不使用官方表）</option>
-            <option value="table">官方解約金表（完全照表）</option>
-            <option value="hybrid" selected="">官方表＋後段利率</option>
-          </select>
-        </div>
-        <div class="f"><label>開始承接年</label><input id="p_startYear_5" type="number" value="8" min="1"></div>
-        <div class="f"><label>提領順位</label><input id="p_priority_5" type="number" value="6" min="1"></div>
-      </div>
-      <div>
-        <div class="f"><label>是否可動本金</label>
-          <select id="p_canPrincipal_5">
-            <option value="1" selected="">可動本金</option>
-            <option value="0">只領利息 / 增值</option>
-          </select>
-        </div>
-        <div class="f"><label>本金動用上限 USD（0=不限）</label><input id="p_cap_5" type="number" value="0"></div>
-        <div class="fixed-box" id="fixedBox_5">
-          <div class="f"><label>官方解約金 / 期初本金表（每年期初值；貼上官方表即可）</label><textarea id="p_fixed_5">23598,32348,42026,43344,47082,48532,64555,66718,68604,70319,71842,73085,74146,74982,75659,76120,76413,76562</textarea></div>
-          <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_5">0,8750,9678,1318,3738,1450,16023,2163,1886,1715,1523,1243,1061,836,677,461,293,149</textarea></div>
-        </div>
-        <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
-      </div>
-    </div>
-    <div class="ratio-section">
-      <div class="ratio-section-title">
-        📊 每年提領比例設定
-        <div class="ratio-mode-toggle">
-          <label><input type="radio" name="ratio_mode_5" value="priority" checked="" onchange="toggleRatioMode(5)"> 順位制（依順位填滿）</label>
-          <label><input type="radio" name="ratio_mode_5" value="ratio" onchange="toggleRatioMode(5)"> 比例制（每年自訂 %）</label>
-        </div>
-      </div>
-      <div id="ratioBox_5" style="display:none">
-        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
-          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
-        </div>
-        <div class="ratio-grid" id="ratioGrid_5"><div class="ratio-row" data-yr="1"><label>第1年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="2"><label>第2年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="3"><label>第3年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="4"><label>第4年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="5"><label>第5年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="6"><label>第6年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="7"><label>第7年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="8"><label>第8年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="9"><label>第9年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="10"><label>第10年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="11"><label>第11年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="12"><label>第12年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="13"><label>第13年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="14"><label>第14年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="15"><label>第15年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="16"><label>第16年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="17"><label>第17年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="18"><label>第18年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="19"><label>第19年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="20"><label>第20年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div></div>
-        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(5)">平均分配重填</button>
-      </div>
-    </div></div><div class="policy-card tone2 use-table" id="policy_6">
-    <div class="policy-head">
-      <div>
-        <h4 id="policyTitle_6">萬事利達2(陳韋庭)</h4>
-        <small id="policySub_6">保誠人壽 81224099</small>
-      </div>
-      <button class="btn-del" onclick="removePolicy(6)">刪除</button>
-    </div>
-    <div class="policy-grid">
-      <div>
-        <div class="f"><label>保單名稱</label><input id="p_name_6" value="萬事利達2(陳韋庭)" oninput="updatePolicyTitle(6)"></div>
-        <div class="f"><label>保險公司</label><input id="p_company_6" value="保誠人壽" oninput="updatePolicyTitle(6)"></div>
-        <div class="f"><label>保單號碼</label><input id="p_no_6" value="81224099" oninput="updatePolicyTitle(6)"></div>
-      </div>
-      <div>
-        <div class="f"><label>目前本金 / 解約金 USD</label><input id="p_start_6" type="number" value="17766"></div>
-        <div class="f"><label>利率 / 後段增值率 %</label><input id="p_rate_6" type="number" value="3.2" step="0.05"></div>
-        <div class="f"><label>本金下限 USD</label><input id="p_floor_6" type="number" value="0"></div>
-      </div>
-      <div>
-        <div class="f"><label>計算模式</label>
-          <select id="p_mode_6" onchange="toggleFixed(6)">
-            <option value="rate">利率推估（不使用官方表）</option>
-            <option value="table">官方解約金表（完全照表）</option>
-            <option value="hybrid" selected="">官方表＋後段利率</option>
-          </select>
-        </div>
-        <div class="f"><label>開始承接年</label><input id="p_startYear_6" type="number" value="9" min="1"></div>
-        <div class="f"><label>提領順位</label><input id="p_priority_6" type="number" value="7" min="1"></div>
-      </div>
-      <div>
-        <div class="f"><label>是否可動本金</label>
-          <select id="p_canPrincipal_6">
-            <option value="1" selected="">可動本金</option>
-            <option value="0">只領利息 / 增值</option>
-          </select>
-        </div>
-        <div class="f"><label>本金動用上限 USD（0=不限）</label><input id="p_cap_6" type="number" value="0"></div>
-        <div class="fixed-box" id="fixedBox_6">
-          <div class="f"><label>官方解約金 / 期初本金表（每年期初值；貼上官方表即可）</label><textarea id="p_fixed_6">17766,24429,31832,33330,36737,38529,70273,37411,76144,73411,76144,78674,80997,85911,84680,86090,87333,88326,89110,89871,89871</textarea></div>
-          <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_6">0,6663,7403,1498,3407,1792,31744,0,38733,0,2733,2530,2323,4914,0,1410,1243,993,784,761,0</textarea></div>
-        </div>
-        <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
-      </div>
-    </div>
-    <div class="ratio-section">
-      <div class="ratio-section-title">
-        📊 每年提領比例設定
-        <div class="ratio-mode-toggle">
-          <label><input type="radio" name="ratio_mode_6" value="priority" checked="" onchange="toggleRatioMode(6)"> 順位制（依順位填滿）</label>
-          <label><input type="radio" name="ratio_mode_6" value="ratio" onchange="toggleRatioMode(6)"> 比例制（每年自訂 %）</label>
-        </div>
-      </div>
-      <div id="ratioBox_6" style="display:none">
-        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
-          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
-        </div>
-        <div class="ratio-grid" id="ratioGrid_6"><div class="ratio-row" data-yr="1"><label>第1年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="2"><label>第2年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="3"><label>第3年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="4"><label>第4年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="5"><label>第5年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="6"><label>第6年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="7"><label>第7年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="8"><label>第8年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="9"><label>第9年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="10"><label>第10年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="11"><label>第11年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="12"><label>第12年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="13"><label>第13年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="14"><label>第14年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="15"><label>第15年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="16"><label>第16年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="17"><label>第17年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="18"><label>第18年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="19"><label>第19年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div><div class="ratio-row" data-yr="20"><label>第20年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="" title="未填寫將沿用上一年比例" onchange="recalc()"><span class="pct">%</span></div></div>
-        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(6)">平均分配重填</button>
-      </div>
-    </div></div></div>
+  <div id="policyList" class="policy-list"></div>
 </div>
 
 <div class="advisor-panel">
@@ -1108,12 +418,12 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
     <div class="advisor-card">
       <h4>現況判讀</h4>
       <div class="f edit-only"><textarea id="summaryStatusInput" placeholder="請輸入現況判讀"></textarea></div>
-      <p id="summaryStatus">本次試算以年領 400,000 TWD 為目標。<br>整體期末資產由第1年約 498,706 USD，推估至最後一年約 497,359 USD。</p>
+      <p id="summaryStatus"></p>
     </div>
     <div class="advisor-card">
       <h4>策略結構說明</h4>
       <div class="f edit-only"><textarea id="summaryStrategyInput" placeholder="請輸入 A→B→C 或多保單接力策略說明"></textarea></div>
-      <p id="summaryStrategy">此模型依照每張保單設定的「開始承接年」與「提領順位」進行接力。前段由順位較前的保單支應，中段再由後續保單承接，避免所有保單同時被動用。</p>
+      <p id="summaryStrategy"></p>
     </div>
     <div class="advisor-card">
       <h4>顧問結論</h4>
@@ -1128,49 +438,12 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
   </div>
 </div>
 
-
 <div class="lump-panel edit-only">
   <div class="panel-title" style="color:var(--C)">💰 單筆大額提領設定（當年度特定保單一次領出）</div>
   <div style="font-size:11px;color:var(--muted);font-weight:500;line-height:1.7;margin-bottom:8px">
     可設定「哪一年、從哪張保單、領多少 USD」的單筆提領。這筆金額會在當年額外扣除，不影響定期領回試算。例如：第3年從萬事利達一次領 USD 5,000 作為房貸。
   </div>
-  <div class="lump-grid" id="lumpGrid"><div class="lump-row" id="lump_0">
-    <label>第</label>
-    <input type="number" id="lump_yr_0" value="1" min="1" style="width:48px" onchange="recalc()">
-    <label>年</label>
-    <select id="lump_pol_0" style="flex:2;min-width:100px" onchange="recalc()"><option value="0">金價美 FDD</option><option value="1">非常美 FGD</option><option value="2">萬事利達(陳怡亘)</option><option value="3">萬事利達(陳韋庭)</option><option value="4">萬事利達(陳加綺)</option><option value="5">萬事利達(陳志強本人)</option><option value="6">萬事利達2(陳韋庭)</option></select>
-    <label>額度 USD</label>
-    <input type="number" id="lump_amt_0" value="0" min="0" onchange="recalc()">
-    <input type="text" id="lump_note_0" value="" placeholder="用途備註" style="flex:2;min-width:80px" onchange="recalc()">
-    <button class="lump-del" onclick="removeLump(0)">✕</button>
-  </div><div class="lump-row" id="lump_1">
-    <label>第</label>
-    <input type="number" id="lump_yr_1" value="1" min="1" style="width:48px" onchange="recalc()">
-    <label>年</label>
-    <select id="lump_pol_1" style="flex:2;min-width:100px" onchange="recalc()"><option value="0">金價美 FDD</option><option value="1">非常美 FGD</option><option value="2">萬事利達(陳怡亘)</option><option value="3">萬事利達(陳韋庭)</option><option value="4">萬事利達(陳加綺)</option><option value="5">萬事利達(陳志強本人)</option><option value="6">萬事利達2(陳韋庭)</option></select>
-    <label>額度 USD</label>
-    <input type="number" id="lump_amt_1" value="0" min="0" onchange="recalc()">
-    <input type="text" id="lump_note_1" value="" placeholder="用途備註" style="flex:2;min-width:80px" onchange="recalc()">
-    <button class="lump-del" onclick="removeLump(1)">✕</button>
-  </div><div class="lump-row" id="lump_2">
-    <label>第</label>
-    <input type="number" id="lump_yr_2" value="1" min="1" style="width:48px" onchange="recalc()">
-    <label>年</label>
-    <select id="lump_pol_2" style="flex:2;min-width:100px" onchange="recalc()"><option value="0">金價美 FDD</option><option value="1">非常美 FGD</option><option value="2">萬事利達(陳怡亘)</option><option value="3">萬事利達(陳韋庭)</option><option value="4">萬事利達(陳加綺)</option><option value="5">萬事利達(陳志強本人)</option><option value="6">萬事利達2(陳韋庭)</option></select>
-    <label>額度 USD</label>
-    <input type="number" id="lump_amt_2" value="0" min="0" onchange="recalc()">
-    <input type="text" id="lump_note_2" value="" placeholder="用途備註" style="flex:2;min-width:80px" onchange="recalc()">
-    <button class="lump-del" onclick="removeLump(2)">✕</button>
-  </div><div class="lump-row" id="lump_3">
-    <label>第</label>
-    <input type="number" id="lump_yr_3" value="1" min="1" style="width:48px" onchange="recalc()">
-    <label>年</label>
-    <select id="lump_pol_3" style="flex:2;min-width:100px" onchange="recalc()"><option value="0">金價美 FDD</option><option value="1">非常美 FGD</option><option value="2">萬事利達(陳怡亘)</option><option value="3">萬事利達(陳韋庭)</option><option value="4">萬事利達(陳加綺)</option><option value="5">萬事利達(陳志強本人)</option><option value="6">萬事利達2(陳韋庭)</option></select>
-    <label>額度 USD</label>
-    <input type="number" id="lump_amt_3" value="0" min="0" onchange="recalc()">
-    <input type="text" id="lump_note_3" value="" placeholder="用途備註" style="flex:2;min-width:80px" onchange="recalc()">
-    <button class="lump-del" onclick="removeLump(3)">✕</button>
-  </div></div>
+  <div class="lump-grid" id="lumpGrid"></div>
   <button class="btn-small" style="margin-top:10px;background:var(--C)" onclick="addLump()">＋新增單筆提領</button>
 </div>
 <div class="note-bar">
@@ -1181,8 +454,8 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
 <div class="sec">逐年現金流試算</div>
 <div class="tbl-wrap">
 <table>
-  <thead id="thead"><tr><th rowspan="2" style="text-align:left;color:#b8b0a0;min-width:88px">年度<br>年齡</th><th colspan="5" class="group-start">金價美 FDD</th><th colspan="5" class="group-start">非常美 FGD</th><th colspan="5" class="group-start">萬事利達(陳怡亘)</th><th colspan="5" class="group-start">萬事利達(陳韋庭)</th><th colspan="5" class="group-start">萬事利達(陳加綺)</th><th colspan="5" class="group-start">萬事利達(陳志強本人)</th><th colspan="5" class="group-start">萬事利達2(陳韋庭)</th><th colspan="3" class="total-start">整合合計</th><th rowspan="2">狀態</th></tr><tr><th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th><th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th><th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th><th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th><th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th><th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th><th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th><th class="total-start">總資產</th><th>總領USD</th><th>總領TWD</th></tr></thead>
-  <tbody id="tbody"><tr><td class="yr-cell">117年<br><span style="font-size:10px;color:var(--muted)">2028 65歲</span></td><td class="group-start">512,039</td><td class="ic">＋0</td><td class="wd">－13,333</td><td>498,706</td><td class="pct-cell">100.0%</td><td class="group-start">89,653</td><td class="ic">＋0</td><td class="wd">—</td><td>89,653</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">35,200</td><td class="ic">＋0</td><td class="wd">—</td><td>35,200</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">34,800</td><td class="ic">＋0</td><td class="wd">—</td><td>34,800</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">36,020</td><td class="ic">＋0</td><td class="wd">—</td><td>36,020</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">23,598</td><td class="ic">＋0</td><td class="wd">—</td><td>23,598</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">17,766</td><td class="ic">＋0</td><td class="wd">—</td><td>17,766</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">655,743</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓<br><span style="color:var(--C);font-size:9.5px">💰金價美 FDD 80,000</span></td></tr><tr><td class="yr-cell">118年<br><span style="font-size:10px;color:var(--muted)">2029 66歲</span></td><td class="group-start">501,691</td><td class="ic">＋0</td><td class="wd">－13,333</td><td>488,357</td><td class="pct-cell">100.0%</td><td class="group-start">96,731</td><td class="ic">＋0</td><td class="wd">—</td><td>96,731</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">48,435</td><td class="ic">＋13,235</td><td class="wd">—</td><td>61,670</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">47,850</td><td class="ic">＋13,050</td><td class="wd">—</td><td>60,900</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">67,120</td><td class="ic">＋31,100</td><td class="wd">—</td><td>98,220</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">32,348</td><td class="ic">＋8,750</td><td class="wd">—</td><td>41,098</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">24,429</td><td class="ic">＋6,663</td><td class="wd">—</td><td>31,092</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">803,068</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓<br><span style="color:var(--C);font-size:9.5px">💰金價美 FDD 75,000</span></td></tr><tr><td class="yr-cell">119年<br><span style="font-size:10px;color:var(--muted)">2030 67歲</span></td><td class="group-start">491,293</td><td class="ic">＋0</td><td class="wd">－13,333</td><td>477,960</td><td class="pct-cell">100.0%</td><td class="group-start">98,025</td><td class="ic">＋0</td><td class="wd">—</td><td>98,025</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">63,078</td><td class="ic">＋14,643</td><td class="wd">—</td><td>77,721</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">62,650</td><td class="ic">＋14,800</td><td class="wd">—</td><td>77,450</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">74,414</td><td class="ic">＋7,294</td><td class="wd">—</td><td>81,708</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">42,026</td><td class="ic">＋9,678</td><td class="wd">—</td><td>51,704</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">31,832</td><td class="ic">＋7,403</td><td class="wd">—</td><td>39,235</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">803,803</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓<br><span style="color:var(--C);font-size:9.5px">💰金價美 FDD 100,000</span></td></tr><tr><td class="yr-cell">120年<br><span style="font-size:10px;color:var(--muted)">2031 68歲</span></td><td class="group-start">480,874</td><td class="ic">＋0</td><td class="wd">－13,333</td><td>467,541</td><td class="pct-cell">100.0%</td><td class="group-start">99,343</td><td class="ic">＋0</td><td class="wd">—</td><td>99,343</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">66,074</td><td class="ic">＋2,996</td><td class="wd">—</td><td>69,070</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">65,364</td><td class="ic">＋2,714</td><td class="wd">—</td><td>68,078</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">77,470</td><td class="ic">＋3,056</td><td class="wd">—</td><td>80,526</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">43,344</td><td class="ic">＋1,318</td><td class="wd">—</td><td>44,662</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">33,330</td><td class="ic">＋1,498</td><td class="wd">—</td><td>34,828</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">864,048</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">121年<br><span style="font-size:10px;color:var(--muted)">2032 69歲</span></td><td class="group-start">470,426</td><td class="ic">＋11,102</td><td class="wd">－13,333</td><td>468,195</td><td class="pct-cell">100.0%</td><td class="group-start">100,684</td><td class="ic">＋0</td><td class="wd">—</td><td>100,684</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">73,117</td><td class="ic">＋7,043</td><td class="wd">—</td><td>80,160</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">71,958</td><td class="ic">＋6,594</td><td class="wd">—</td><td>78,552</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">143,208</td><td class="ic">＋65,738</td><td class="wd">—</td><td>208,946</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">47,082</td><td class="ic">＋3,738</td><td class="wd">—</td><td>50,820</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">36,737</td><td class="ic">＋3,407</td><td class="wd">—</td><td>40,144</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,027,501</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">122年<br><span style="font-size:10px;color:var(--muted)">2033 70歲</span></td><td class="group-start">471,048</td><td class="ic">＋11,395</td><td class="wd">－13,333</td><td>469,109</td><td class="pct-cell">100.0%</td><td class="group-start">102,030</td><td class="ic">＋0</td><td class="wd">—</td><td>102,030</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">76,317</td><td class="ic">＋3,200</td><td class="wd">—</td><td>79,517</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">75,468</td><td class="ic">＋3,510</td><td class="wd">—</td><td>78,978</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">149,938</td><td class="ic">＋6,730</td><td class="wd">—</td><td>156,668</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">48,532</td><td class="ic">＋1,450</td><td class="wd">—</td><td>49,982</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">38,529</td><td class="ic">＋1,792</td><td class="wd">—</td><td>40,321</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">976,605</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">資產遞減</td></tr><tr><td class="yr-cell">123年<br><span style="font-size:10px;color:var(--muted)">2034 71歲</span></td><td class="group-start">471,923</td><td class="ic">＋11,701</td><td class="wd">－13,333</td><td>470,291</td><td class="pct-cell">100.0%</td><td class="group-start">103,367</td><td class="ic">＋2,595</td><td class="wd">—</td><td>105,962</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">141,051</td><td class="ic">＋64,734</td><td class="wd">—</td><td>205,785</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">137,648</td><td class="ic">＋62,180</td><td class="wd">—</td><td>199,828</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">156,260</td><td class="ic">＋6,322</td><td class="wd">—</td><td>162,582</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">64,555</td><td class="ic">＋16,023</td><td class="wd">—</td><td>80,578</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">70,273</td><td class="ic">＋31,744</td><td class="wd">—</td><td>102,017</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,327,043</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">124年<br><span style="font-size:10px;color:var(--muted)">2035 72歲</span></td><td class="group-start">473,001</td><td class="ic">＋12,388</td><td class="wd">－13,333</td><td>472,056</td><td class="pct-cell">100.0%</td><td class="group-start">104,795</td><td class="ic">＋2,700</td><td class="wd">—</td><td>107,495</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">147,617</td><td class="ic">＋6,566</td><td class="wd">—</td><td>154,183</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">142,726</td><td class="ic">＋5,078</td><td class="wd">—</td><td>147,804</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">162,457</td><td class="ic">＋6,197</td><td class="wd">—</td><td>168,654</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">66,718</td><td class="ic">＋2,163</td><td class="wd">—</td><td>68,881</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">37,411</td><td class="ic">＋0</td><td class="wd">—</td><td>37,411</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,156,484</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">資產遞減</td></tr><tr><td class="yr-cell">125年<br><span style="font-size:10px;color:var(--muted)">2036 73歲</span></td><td class="group-start">474,724</td><td class="ic">＋13,129</td><td class="wd">－13,333</td><td>474,520</td><td class="pct-cell">100.0%</td><td class="group-start">106,266</td><td class="ic">＋2,809</td><td class="wd">—</td><td>109,075</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">153,645</td><td class="ic">＋6,028</td><td class="wd">—</td><td>159,673</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">147,334</td><td class="ic">＋4,608</td><td class="wd">—</td><td>151,942</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">168,266</td><td class="ic">＋5,809</td><td class="wd">—</td><td>174,075</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">68,604</td><td class="ic">＋1,886</td><td class="wd">—</td><td>70,490</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">76,144</td><td class="ic">＋38,733</td><td class="wd">—</td><td>114,877</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,254,652</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">126年<br><span style="font-size:10px;color:var(--muted)">2037 74歲</span></td><td class="group-start">477,142</td><td class="ic">＋13,931</td><td class="wd">－13,333</td><td>477,740</td><td class="pct-cell">100.0%</td><td class="group-start">107,787</td><td class="ic">＋2,923</td><td class="wd">—</td><td>110,710</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">159,842</td><td class="ic">＋6,197</td><td class="wd">—</td><td>166,039</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">151,802</td><td class="ic">＋4,468</td><td class="wd">—</td><td>156,270</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">176,760</td><td class="ic">＋8,494</td><td class="wd">—</td><td>185,254</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">70,319</td><td class="ic">＋1,715</td><td class="wd">—</td><td>72,034</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">73,411</td><td class="ic">＋0</td><td class="wd">—</td><td>73,411</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,241,458</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">資產遞減</td></tr><tr><td class="yr-cell">127年<br><span style="font-size:10px;color:var(--muted)">2038 75歲</span></td><td class="group-start">479,717</td><td class="ic">＋14,355</td><td class="wd">－13,333</td><td>480,739</td><td class="pct-cell">100.0%</td><td class="group-start">110,000</td><td class="ic">＋3,043</td><td class="wd">—</td><td>113,043</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">165,523</td><td class="ic">＋5,681</td><td class="wd">—</td><td>171,204</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">156,134</td><td class="ic">＋4,332</td><td class="wd">—</td><td>160,466</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">179,213</td><td class="ic">＋2,453</td><td class="wd">—</td><td>181,666</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">71,842</td><td class="ic">＋1,523</td><td class="wd">—</td><td>73,365</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">76,144</td><td class="ic">＋2,733</td><td class="wd">—</td><td>78,877</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,259,360</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">128年<br><span style="font-size:10px;color:var(--muted)">2039 76歲</span></td><td class="group-start">482,243</td><td class="ic">＋14,789</td><td class="wd">－13,333</td><td>483,699</td><td class="pct-cell">100.0%</td><td class="group-start">112,513</td><td class="ic">＋3,165</td><td class="wd">—</td><td>115,678</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">170,938</td><td class="ic">＋5,415</td><td class="wd">—</td><td>176,353</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">159,926</td><td class="ic">＋3,792</td><td class="wd">—</td><td>163,718</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">184,025</td><td class="ic">＋4,812</td><td class="wd">—</td><td>188,837</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">73,085</td><td class="ic">＋1,243</td><td class="wd">—</td><td>74,328</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">78,674</td><td class="ic">＋2,530</td><td class="wd">—</td><td>81,204</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,283,817</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">129年<br><span style="font-size:10px;color:var(--muted)">2040 77歲</span></td><td class="group-start">484,727</td><td class="ic">＋15,234</td><td class="wd">－13,333</td><td>486,628</td><td class="pct-cell">100.0%</td><td class="group-start">114,120</td><td class="ic">＋3,208</td><td class="wd">—</td><td>117,328</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">176,092</td><td class="ic">＋5,154</td><td class="wd">—</td><td>181,246</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">163,696</td><td class="ic">＋3,770</td><td class="wd">—</td><td>167,466</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">188,595</td><td class="ic">＋4,570</td><td class="wd">—</td><td>193,165</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">74,146</td><td class="ic">＋1,061</td><td class="wd">—</td><td>75,207</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">80,997</td><td class="ic">＋2,323</td><td class="wd">—</td><td>83,320</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,304,360</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">130年<br><span style="font-size:10px;color:var(--muted)">2041 78歲</span></td><td class="group-start">487,157</td><td class="ic">＋15,690</td><td class="wd">－13,333</td><td>489,514</td><td class="pct-cell">100.0%</td><td class="group-start">116,402</td><td class="ic">＋3,252</td><td class="wd">—</td><td>119,654</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">180,987</td><td class="ic">＋4,895</td><td class="wd">—</td><td>185,882</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">196,979</td><td class="ic">＋33,283</td><td class="wd">—</td><td>230,262</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">193,043</td><td class="ic">＋4,448</td><td class="wd">—</td><td>197,491</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">74,982</td><td class="ic">＋836</td><td class="wd">—</td><td>75,818</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">85,911</td><td class="ic">＋4,914</td><td class="wd">—</td><td>90,825</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,389,446</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">131年<br><span style="font-size:10px;color:var(--muted)">2042 79歲</span></td><td class="group-start">489,529</td><td class="ic">＋16,159</td><td class="wd">－13,333</td><td>492,355</td><td class="pct-cell">100.0%</td><td class="group-start">117,380</td><td class="ic">＋3,299</td><td class="wd">—</td><td>120,679</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">185,657</td><td class="ic">＋4,670</td><td class="wd">—</td><td>190,327</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">170,193</td><td class="ic">＋0</td><td class="wd">—</td><td>170,193</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">197,390</td><td class="ic">＋4,347</td><td class="wd">—</td><td>201,737</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">75,659</td><td class="ic">＋677</td><td class="wd">—</td><td>76,336</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">84,680</td><td class="ic">＋0</td><td class="wd">—</td><td>84,680</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,336,307</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">資產遞減</td></tr><tr><td class="yr-cell">132年<br><span style="font-size:10px;color:var(--muted)">2043 80歲</span></td><td class="group-start">491,839</td><td class="ic">＋16,640</td><td class="wd">－13,333</td><td>495,145</td><td class="pct-cell">100.0%</td><td class="group-start">119,031</td><td class="ic">＋3,346</td><td class="wd">—</td><td>122,377</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">190,100</td><td class="ic">＋4,443</td><td class="wd">—</td><td>194,543</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">173,140</td><td class="ic">＋2,947</td><td class="wd">—</td><td>176,087</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">202,732</td><td class="ic">＋5,342</td><td class="wd">—</td><td>208,074</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">76,120</td><td class="ic">＋461</td><td class="wd">—</td><td>76,581</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">86,090</td><td class="ic">＋1,410</td><td class="wd">—</td><td>87,500</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,360,307</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">133年<br><span style="font-size:10px;color:var(--muted)">2044 81歲</span></td><td class="group-start">495,145</td><td class="ic">＋13,864</td><td class="wd">－13,333</td><td>495,676</td><td class="pct-cell">100.0%</td><td class="group-start">120,694</td><td class="ic">＋3,395</td><td class="wd">—</td><td>124,089</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">194,317</td><td class="ic">＋4,217</td><td class="wd">—</td><td>198,534</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">175,917</td><td class="ic">＋2,777</td><td class="wd">—</td><td>178,694</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">207,652</td><td class="ic">＋4,920</td><td class="wd">—</td><td>212,572</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">76,413</td><td class="ic">＋293</td><td class="wd">—</td><td>76,706</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">87,333</td><td class="ic">＋1,243</td><td class="wd">—</td><td>88,576</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,374,847</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">134年<br><span style="font-size:10px;color:var(--muted)">2045 82歲</span></td><td class="group-start">495,676</td><td class="ic">＋13,879</td><td class="wd">－13,333</td><td>496,222</td><td class="pct-cell">100.0%</td><td class="group-start">122,368</td><td class="ic">＋3,443</td><td class="wd">—</td><td>125,811</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">199,906</td><td class="ic">＋5,589</td><td class="wd">—</td><td>205,495</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">17,388</td><td class="ic">＋0</td><td class="wd">—</td><td>17,388</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">212,455</td><td class="ic">＋4,803</td><td class="wd">—</td><td>217,258</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">76,562</td><td class="ic">＋149</td><td class="wd">—</td><td>76,711</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">88,326</td><td class="ic">＋993</td><td class="wd">—</td><td>89,319</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,228,204</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">資產遞減</td></tr><tr><td class="yr-cell">135年<br><span style="font-size:10px;color:var(--muted)">2046 83歲</span></td><td class="group-start">496,222</td><td class="ic">＋13,894</td><td class="wd">－13,333</td><td>496,782</td><td class="pct-cell">100.0%</td><td class="group-start">124,053</td><td class="ic">＋1,694</td><td class="wd">—</td><td>125,747</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">205,369</td><td class="ic">＋5,463</td><td class="wd">—</td><td>210,832</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">200,225</td><td class="ic">＋182,837</td><td class="wd">—</td><td>383,062</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">216,871</td><td class="ic">＋4,416</td><td class="wd">—</td><td>221,287</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">76,711</td><td class="ic">＋2,301</td><td class="wd">—</td><td>79,012</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">89,110</td><td class="ic">＋784</td><td class="wd">—</td><td>89,894</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,606,617</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">✓</td></tr><tr><td class="yr-cell">136年<br><span style="font-size:10px;color:var(--muted)">2047 84歲</span></td><td class="group-start">496,782</td><td class="ic">＋13,910</td><td class="wd">－13,333</td><td>497,359</td><td class="pct-cell">100.0%</td><td class="group-start">125,747</td><td class="ic">＋5,281</td><td class="wd">—</td><td>131,028</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">210,406</td><td class="ic">＋5,037</td><td class="wd">—</td><td>215,443</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">209,573</td><td class="ic">＋9,348</td><td class="wd">—</td><td>218,921</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">220,969</td><td class="ic">＋4,098</td><td class="wd">—</td><td>225,067</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">79,012</td><td class="ic">＋2,370</td><td class="wd">—</td><td>81,383</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="group-start">89,871</td><td class="ic">＋761</td><td class="wd">—</td><td>90,632</td><td class="pct-cell" style="color:var(--muted)">—</td><td class="sv-t total-start">1,459,833</td><td class="wd">13,333</td><td class="twd-ok">400,000</td><td class="status-note">資產遞減</td></tr><tr class="grand"><td colspan="36" style="text-align:right;font-family:'Noto Sans TC',sans-serif;font-size:10.5px;letter-spacing:.06em">20 年累計</td><td>1,459,833</td><td>266,667</td><td>8,000,000</td><td></td></tr><tr style="background: var(--C-bg);"><td colspan="40" style="font-family:'Noto Sans TC',sans-serif;font-size:11px;font-weight:700;color:var(--C);padding:8px 12px">💰 單筆大額提領合計：USD 255,000 ／ TWD 7,650,000</td></tr></tbody>
+  <thead id="thead"></thead>
+  <tbody id="tbody"></tbody>
 </table>
 </div>
 
@@ -1190,11 +463,11 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
 <div class="charts">
   <div class="chart-box">
     <h3>各保單期末餘額走勢（USD）</h3>
-    <canvas id="chartPV" height="440" width="1128" style="width: 564px; height: 220px;"></canvas>
+    <canvas id="chartPV" height="220"></canvas>
   </div>
   <div class="chart-box">
     <h3>年度領回來源 vs 目標 TWD</h3>
-    <canvas id="chartWD" height="440" width="1128" style="width: 564px; height: 220px;"></canvas>
+    <canvas id="chartWD" height="220"></canvas>
   </div>
 </div>
 
@@ -1300,442 +573,454 @@ function addPolicy(data={}){
         <div class="f"><label>本金動用上限 USD（0=不限）</label><input id="p_cap_${id}" type="number" value="${d.cap}"></div>
         <div class="fixed-box" id="fixedBox_${id}">
           <div class="f"><label>官方解約金 / 期初本金表（每年期初值；貼上官方表即可）</label><textarea id="p_fixed_${id}">${d.fixed}</textarea></div>
-          <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_${id}">${d.growth||''}</textarea></div>
-        </div>
-        <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
-      </div>
+
+```
+      <div class="f"><label>年度利息 / 增值金表（可選；逐年填寫，優先於利率推估）</label><textarea id="p_growth_${id}">${d.growth||''}</textarea></div>
     </div>
-    <div class="ratio-section">
-      <div class="ratio-section-title">
-        📊 每年提領比例設定
-        <div class="ratio-mode-toggle">
-          <label><input type="radio" name="ratio_mode_${id}" value="priority" checked onchange="toggleRatioMode(${id})"> 順位制（依順位填滿）</label>
-          <label><input type="radio" name="ratio_mode_${id}" value="ratio" onchange="toggleRatioMode(${id})"> 比例制（每年自訂 %）</label>
-        </div>
-      </div>
-      <div id="ratioBox_${id}" style="display:none">
-        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
-          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
-        </div>
-        <div class="ratio-grid" id="ratioGrid_${id}"></div>
-        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(${id})">平均分配重填</button>
-      </div>
-    </div>`;
-  document.getElementById('policyList').appendChild(div);
-  toggleFixed(id);
-  buildRatioGrid(id);
-  recalc();
+    <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
+  </div>
+</div>
+<div class="ratio-section">
+  <div class="ratio-section-title">
+    📊 每年提領比例設定
+    <div class="ratio-mode-toggle">
+      <label><input type="radio" name="ratio_mode_${id}" value="priority" checked onchange="toggleRatioMode(${id})"> 順位制（依順位填滿）</label>
+      <label><input type="radio" name="ratio_mode_${id}" value="ratio" onchange="toggleRatioMode(${id})"> 比例制（每年自訂 %）</label>
+    </div>
+  </div>
+  <div id="ratioBox_${id}" style="display:none">
+    <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
+      每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
+    </div>
+    <div class="ratio-grid" id="ratioGrid_${id}"></div>
+    <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(${id})">平均分配重填</button>
+  </div>
+</div>`;
+```
+
+document.getElementById(‘policyList’).appendChild(div);
+toggleFixed(id);
+buildRatioGrid(id);
+recalc();
 }
 function updatePolicyTitle(id){
-  const n=document.getElementById(`p_name_${id}`).value||`保單 ${id+1}`;
-  const c=document.getElementById(`p_company_${id}`).value||'保險公司';
-  const no=document.getElementById(`p_no_${id}`).value||'';
-  document.getElementById(`policyTitle_${id}`).textContent=n;
-  document.getElementById(`policySub_${id}`).textContent=`${c} ${no}`;
+const n=document.getElementById(`p_name_${id}`).value||`保單 ${id+1}`;
+const c=document.getElementById(`p_company_${id}`).value||‘保險公司’;
+const no=document.getElementById(`p_no_${id}`).value||’’;
+document.getElementById(`policyTitle_${id}`).textContent=n;
+document.getElementById(`policySub_${id}`).textContent=`${c} ${no}`;
 }
 function toggleFixed(id){
-  const mode=document.getElementById(`p_mode_${id}`).value;
-  const card=document.getElementById(`policy_${id}`);
-  if(mode==='table'||mode==='hybrid') card.classList.add('use-table');
-  else card.classList.remove('use-table');
+const mode=document.getElementById(`p_mode_${id}`).value;
+const card=document.getElementById(`policy_${id}`);
+if(mode===‘table’||mode===‘hybrid’) card.classList.add(‘use-table’);
+else card.classList.remove(‘use-table’);
 }
 function removePolicy(id){
-  const el=document.getElementById(`policy_${id}`);
-  if(el) el.remove();
-  recalc();
+const el=document.getElementById(`policy_${id}`);
+if(el) el.remove();
+recalc();
 }
 function getPolicies(){
-  return [...document.querySelectorAll('.policy-card')].map(card=>{
-    const id=card.id.replace('policy_','');
-    return {
-      id,
-      name:document.getElementById(`p_name_${id}`).value||`保單 ${id}`,
-      company:document.getElementById(`p_company_${id}`).value||'',
-      no:document.getElementById(`p_no_${id}`).value||'',
-      start:+document.getElementById(`p_start_${id}`).value||0,
-      rate:(+document.getElementById(`p_rate_${id}`).value||0)/100,
-      mode:document.getElementById(`p_mode_${id}`).value,
-      fixed:parseTable(document.getElementById(`p_fixed_${id}`).value),
-      growthTable:parseTable(document.getElementById(`p_growth_${id}`).value),
-      startYear:+document.getElementById(`p_startYear_${id}`).value||1,
-      priority:+document.getElementById(`p_priority_${id}`).value||1,
-      canPrincipal:document.getElementById(`p_canPrincipal_${id}`).value==='1',
-      floor:+document.getElementById(`p_floor_${id}`).value||0,
-      cap:+document.getElementById(`p_cap_${id}`).value||0,
-      capUsed:0,
-      principalTaken:0,
-      balance:+document.getElementById(`p_start_${id}`).value||0
-    };
-  }).sort((a,b)=>a.priority-b.priority);
+return […document.querySelectorAll(’.policy-card’)].map(card=>{
+const id=card.id.replace(‘policy_’,’’);
+return {
+id,
+name:document.getElementById(`p_name_${id}`).value||`保單 ${id}`,
+company:document.getElementById(`p_company_${id}`).value||’’,
+no:document.getElementById(`p_no_${id}`).value||’’,
+start:+document.getElementById(`p_start_${id}`).value||0,
+rate:(+document.getElementById(`p_rate_${id}`).value||0)/100,
+mode:document.getElementById(`p_mode_${id}`).value,
+fixed:parseTable(document.getElementById(`p_fixed_${id}`).value),
+growthTable:parseTable(document.getElementById(`p_growth_${id}`).value),
+startYear:+document.getElementById(`p_startYear_${id}`).value||1,
+priority:+document.getElementById(`p_priority_${id}`).value||1,
+canPrincipal:document.getElementById(`p_canPrincipal_${id}`).value===‘1’,
+floor:+document.getElementById(`p_floor_${id}`).value||0,
+cap:+document.getElementById(`p_cap_${id}`).value||0,
+capUsed:0,
+principalTaken:0,
+balance:+document.getElementById(`p_start_${id}`).value||0
+};
+}).sort((a,b)=>a.priority-b.priority);
 }
 function hasOfficialTable(policy, yearIndex){
-  return (policy.mode==='table'||policy.mode==='hybrid') && policy.fixed && policy.fixed.length && yearIndex < policy.fixed.length;
+return (policy.mode===‘table’||policy.mode===‘hybrid’) && policy.fixed && policy.fixed.length && yearIndex < policy.fixed.length;
 }
 
 function getPolicyStart(policy, yearIndex){
-  if(hasOfficialTable(policy, yearIndex)){
-    return Math.max(0, policy.fixed[yearIndex] - policy.principalTaken);
-  }
-  return Math.max(0, policy.balance);
+if(hasOfficialTable(policy, yearIndex)){
+return Math.max(0, policy.fixed[yearIndex] - policy.principalTaken);
+}
+return Math.max(0, policy.balance);
 }
 
 function getPolicyBaseStart(policy, yearIndex, actualStart){
-  if(hasOfficialTable(policy, yearIndex)){
-    return policy.fixed[yearIndex];
-  }
-  return actualStart;
+if(hasOfficialTable(policy, yearIndex)){
+return policy.fixed[yearIndex];
+}
+return actualStart;
 }
 
 function plannedGrowth(policy, yearIndex, baseStart, actualStart){
-  let baseGrowth = 0;
+let baseGrowth = 0;
 
-  if(policy.growthTable && policy.growthTable.length && yearIndex < policy.growthTable.length){
-    baseGrowth = policy.growthTable[yearIndex];
-  }else if((policy.mode==='table'||policy.mode==='hybrid') && policy.fixed.length && yearIndex + 1 < policy.fixed.length){
-    baseGrowth = Math.max(0, policy.fixed[yearIndex + 1] - policy.fixed[yearIndex]);
-  }else{
-    baseGrowth = actualStart * policy.rate;
-  }
+if(policy.growthTable && policy.growthTable.length && yearIndex < policy.growthTable.length){
+baseGrowth = policy.growthTable[yearIndex];
+}else if((policy.mode===‘table’||policy.mode===‘hybrid’) && policy.fixed.length && yearIndex + 1 < policy.fixed.length){
+baseGrowth = Math.max(0, policy.fixed[yearIndex + 1] - policy.fixed[yearIndex]);
+}else{
+baseGrowth = actualStart * policy.rate;
+}
 
-  if(baseStart > 0 && actualStart < baseStart){
-    baseGrowth = baseGrowth * (actualStart / baseStart);
-  }
+if(baseStart > 0 && actualStart < baseStart){
+baseGrowth = baseGrowth * (actualStart / baseStart);
+}
 
-  if(actualStart <= 0) return 0;
-  return Math.max(0, baseGrowth);
+if(actualStart <= 0) return 0;
+return Math.max(0, baseGrowth);
 }
 // ── Ratio helpers ─────────────────────────────────────────────────────
 function toggleRatioMode(id){
-  const mode = document.querySelector(`input[name="ratio_mode_${id}"]:checked`)?.value||'priority';
-  const box = document.getElementById(`ratioBox_${id}`);
-  if(box) box.style.display = mode==='ratio' ? 'block' : 'none';
-  recalc();
+const mode = document.querySelector(`input[name="ratio_mode_${id}"]:checked`)?.value||‘priority’;
+const box = document.getElementById(`ratioBox_${id}`);
+if(box) box.style.display = mode===‘ratio’ ? ‘block’ : ‘none’;
+recalc();
 }
 
 function buildRatioGrid(id){
-  const years = +document.getElementById('years').value||12;
-  const grid = document.getElementById(`ratioGrid_${id}`);
-  if(!grid) return;
-  // Preserve existing values
-  const existing = {};
-  grid.querySelectorAll('.ratio-row').forEach(row=>{
-    const yr = +row.dataset.yr;
-    const inp = row.querySelector('input');
-    if(inp && inp.value!=='') existing[yr] = inp.value;
-  });
-  grid.innerHTML = '';
-  for(let y=1;y<=years;y++){
-    const row = document.createElement('div');
-    row.className = 'ratio-row';
-    row.dataset.yr = y;
-    const hasVal = existing[y]!==undefined && existing[y]!=='';
-    row.innerHTML = `<label>第${y}年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="${hasVal?existing[y]:''}" title="${hasVal?'':'未填寫將沿用上一年比例'}" onchange="recalc()"><span class="pct">%</span>`;
-    grid.appendChild(row);
-  }
+const years = +document.getElementById(‘years’).value||12;
+const grid = document.getElementById(`ratioGrid_${id}`);
+if(!grid) return;
+// Preserve existing values
+const existing = {};
+grid.querySelectorAll(’.ratio-row’).forEach(row=>{
+const yr = +row.dataset.yr;
+const inp = row.querySelector(‘input’);
+if(inp && inp.value!==’’) existing[yr] = inp.value;
+});
+grid.innerHTML = ‘’;
+for(let y=1;y<=years;y++){
+const row = document.createElement(‘div’);
+row.className = ‘ratio-row’;
+row.dataset.yr = y;
+const hasVal = existing[y]!==undefined && existing[y]!==’’;
+row.innerHTML = `<label>第${y}年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="${hasVal?existing[y]:''}" title="${hasVal?'':'未填寫將沿用上一年比例'}" onchange="recalc()"><span class="pct">%</span>`;
+grid.appendChild(row);
+}
 }
 
 function fillRatioEvenly(id){
-  const grid = document.getElementById(`ratioGrid_${id}`);
-  if(!grid) return;
-  // Count active policies using ratio mode
-  const activePolicies = [...document.querySelectorAll('.policy-card')].filter(c=>{
-    const pid = c.id.replace('policy_','');
-    return document.querySelector(`input[name="ratio_mode_${pid}"]:checked`)?.value==='ratio';
-  });
-  const share = activePolicies.length>0 ? Math.round(100/activePolicies.length) : 100;
-  grid.querySelectorAll('input').forEach(inp=>{ inp.value=share; });
-  recalc();
+const grid = document.getElementById(`ratioGrid_${id}`);
+if(!grid) return;
+// Count active policies using ratio mode
+const activePolicies = […document.querySelectorAll(’.policy-card’)].filter(c=>{
+const pid = c.id.replace(‘policy_’,’’);
+return document.querySelector(`input[name="ratio_mode_${pid}"]:checked`)?.value===‘ratio’;
+});
+const share = activePolicies.length>0 ? Math.round(100/activePolicies.length) : 100;
+grid.querySelectorAll(‘input’).forEach(inp=>{ inp.value=share; });
+recalc();
 }
 
 function getRatioForPolicy(id, yearIndex){
-  // yearIndex is 0-based; year label is 1-based
-  const mode = document.querySelector(`input[name="ratio_mode_${id}"]:checked`)?.value||'priority';
-  if(mode!=='ratio') return null; // null = use priority mode
-  const grid = document.getElementById(`ratioGrid_${id}`);
-  if(!grid) return null;
-  const rows = grid.querySelectorAll('.ratio-row');
-  let lastVal = null;
-  for(let r of rows){
-    const yr = +r.dataset.yr;
-    const inp = r.querySelector('input');
-    const v = inp.value!=='' ? +inp.value : null;
-    if(v!==null) lastVal = v;
-    if(yr === yearIndex+1) return lastVal; // carry-forward
-  }
-  return lastVal;
+// yearIndex is 0-based; year label is 1-based
+const mode = document.querySelector(`input[name="ratio_mode_${id}"]:checked`)?.value||‘priority’;
+if(mode!==‘ratio’) return null; // null = use priority mode
+const grid = document.getElementById(`ratioGrid_${id}`);
+if(!grid) return null;
+const rows = grid.querySelectorAll(’.ratio-row’);
+let lastVal = null;
+for(let r of rows){
+const yr = +r.dataset.yr;
+const inp = r.querySelector(‘input’);
+const v = inp.value!==’’ ? +inp.value : null;
+if(v!==null) lastVal = v;
+if(yr === yearIndex+1) return lastVal; // carry-forward
+}
+return lastVal;
 }
 
 // Rebuild ratio grids when year count changes
 function rebuildAllRatioGrids(){
-  document.querySelectorAll('.policy-card').forEach(card=>{
-    const id = card.id.replace('policy_','');
-    buildRatioGrid(id);
-  });
+document.querySelectorAll(’.policy-card’).forEach(card=>{
+const id = card.id.replace(‘policy_’,’’);
+buildRatioGrid(id);
+});
 }
 
 function recalc(){
-  syncHeader();
-  const FX=+document.getElementById('fx').value||31;
-  const targetTWD=+document.getElementById('targetTWD').value||120000;
-  const targetUSD=targetTWD/FX;
-  const years=+document.getElementById('years').value||12;
-  const rocStart=+document.getElementById('rocStart').value||115;
-  const ageStart=+document.getElementById('clientAge').value||0;
-  const policies=getPolicies();
-  const rows=[];
+syncHeader();
+const FX=+document.getElementById(‘fx’).value||31;
+const targetTWD=+document.getElementById(‘targetTWD’).value||120000;
+const targetUSD=targetTWD/FX;
+const years=+document.getElementById(‘years’).value||12;
+const rocStart=+document.getElementById(‘rocStart’).value||115;
+const ageStart=+document.getElementById(‘clientAge’).value||0;
+const policies=getPolicies();
+const rows=[];
 
-  for(let i=0;i<years;i++){
-    let need=targetUSD;
-    const items=[];
-    let totalAsset=0,totalGrowth=0,totalWithdraw=0;
+const regularStartYear = +document.getElementById(‘regularStartYear’)?.value||1;
+for(let i=0;i<years;i++){
+// 若未到定期提領起始年，定期提領金額為0（只有單筆提領）
+const isRegularYear = (i+1) >= regularStartYear;
+let need = isRegularYear ? targetUSD : 0;
+const items=[];
+let totalAsset=0,totalGrowth=0,totalWithdraw=0;
 
-    // ── Step 1: compute each policy's start/growth ──
-    const policyData = policies.map(p=>{
-      const start = getPolicyStart(p, i);
-      const baseStart = getPolicyBaseStart(p, i, start);
-      const growth = plannedGrowth(p, i, baseStart, start);
-      return {p, start, baseStart, growth};
-    });
+```
+// ── Step 1: compute each policy's start/growth ──
+const policyData = policies.map(p=>{
+  const start = getPolicyStart(p, i);
+  const baseStart = getPolicyBaseStart(p, i, start);
+  const growth = plannedGrowth(p, i, baseStart, start);
+  return {p, start, baseStart, growth};
+});
 
-    // ── Step 2: determine ratio-mode allocation ──
-    // For ratio-mode policies, reserve their share of targetUSD first
-    // For priority-mode policies, fill remaining need in order
-    const ratioAlloc = {}; // policyId -> allocated USD
-    let ratioTotal = 0;
-    for(const {p} of policyData){
-      if((i+1) < p.startYear) continue;
-      const r = getRatioForPolicy(p.id, i);
-      if(r !== null){
-        const alloc = targetUSD * (r/100);
-        ratioAlloc[p.id] = alloc;
-        ratioTotal += alloc;
-      }
-    }
-    // Remaining need after ratio allocations
-    let priorityNeed = Math.max(0, targetUSD - ratioTotal);
+// ── Step 2: determine ratio-mode allocation ──
+// For ratio-mode policies, reserve their share of targetUSD first
+// For priority-mode policies, fill remaining need in order
+const ratioAlloc = {}; // policyId -> allocated USD
+let ratioTotal = 0;
+for(const {p} of policyData){
+  if((i+1) < p.startYear) continue;
+  const r = getRatioForPolicy(p.id, i);
+  if(r !== null){
+    const alloc = targetUSD * (r/100);
+    ratioAlloc[p.id] = alloc;
+    ratioTotal += alloc;
+  }
+}
+// Remaining need after ratio allocations
+let priorityNeed = Math.max(0, targetUSD - ratioTotal);
 
-    // ── Step 3: process each policy ──
-    for(const {p, start, baseStart, growth} of policyData){
-      let takeGrowth=0, takePrincipal=0;
+// ── Step 3: process each policy ──
+for(const {p, start, baseStart, growth} of policyData){
+  let takeGrowth=0, takePrincipal=0;
 
-      if((i+1) >= p.startYear){
-        const ratioMode = getRatioForPolicy(p.id, i) !== null;
-        let myNeed;
+  if((i+1) >= p.startYear){
+    const ratioMode = getRatioForPolicy(p.id, i) !== null;
+    let myNeed;
 
-        if(ratioMode){
-          // Use ratio allocation
-          myNeed = ratioAlloc[p.id] || 0;
-        } else {
-          // Priority mode: take from remaining need
-          myNeed = priorityNeed;
-        }
-
-        takeGrowth = Math.min(growth, myNeed);
-        myNeed -= takeGrowth;
-
-        if(myNeed > 0 && p.canPrincipal){
-          const capLeft = p.cap>0 ? Math.max(0,p.cap-p.capUsed) : Infinity;
-          const available = Math.max(0, start-p.floor);
-          takePrincipal = Math.min(myNeed, available, capLeft);
-          myNeed -= takePrincipal;
-          p.capUsed += takePrincipal;
-          p.principalTaken += takePrincipal;
-        }
-
-        if(!ratioMode){
-          const actualTaken = takeGrowth + takePrincipal;
-          priorityNeed = Math.max(0, priorityNeed - actualTaken);
-        }
-      }
-
-      const withdraw = takeGrowth + takePrincipal;
-      const end = Math.max(0, start + growth - withdraw);
-      p.balance = end;
-      totalAsset += end;
-      totalGrowth += growth;
-      totalWithdraw += withdraw;
-
-      // Compute actual % of target this policy contributed
-      const pctOfTarget = targetUSD > 0 ? (withdraw / targetUSD * 100) : 0;
-      items.push({name:p.name, id:p.id, start, growth, withdraw, end, takeGrowth, takePrincipal, baseStart, pctOfTarget});
+    if(ratioMode){
+      // Use ratio allocation
+      myNeed = ratioAlloc[p.id] || 0;
+    } else {
+      // Priority mode: take from remaining need
+      myNeed = priorityNeed;
     }
 
-    // Update need for shortfall reporting
-    need = Math.max(0, targetUSD - totalWithdraw);
+    takeGrowth = Math.min(growth, myNeed);
+    myNeed -= takeGrowth;
 
-    // ── Lump-sum withdrawals this year ──
-    const lumpItems = getLumpsForYear(i+1, policies);
-    let lumpTotalUSD = 0;
-    for(const lp of lumpItems){
-      const pol = policies.find(p=>p.id===lp.policyId);
-      if(pol){
-        const take = Math.min(lp.amount, pol.balance);
-        pol.balance = Math.max(0, pol.balance - take);
-        lumpTotalUSD += take;
-        // Also subtract from totalAsset
-        totalAsset = Math.max(0, totalAsset - take);
-        lp.actual = take;
-      }
+    if(myNeed > 0 && p.canPrincipal){
+      const capLeft = p.cap>0 ? Math.max(0,p.cap-p.capUsed) : Infinity;
+      const available = Math.max(0, start-p.floor);
+      takePrincipal = Math.min(myNeed, available, capLeft);
+      myNeed -= takePrincipal;
+      p.capUsed += takePrincipal;
+      p.principalTaken += takePrincipal;
     }
 
-    rows.push({
-      year:i+1,
-      roc:rocStart+i,
-      ad:rocStart+i+1911,
-      age:ageStart+i,
-      items,
-      totalAsset,
-      totalGrowth,
-      totalWithdraw,
-      totalTWD:Math.round(totalWithdraw*FX),
-      shortfall:need,
-      lumpItems,
-      lumpTotalUSD
-    });
+    if(!ratioMode){
+      const actualTaken = takeGrowth + takePrincipal;
+      priorityNeed = Math.max(0, priorityNeed - actualTaken);
+    }
   }
 
-  renderSummary(rows,targetTWD);
-  renderTable(rows,policies,FX);
-  renderCharts(rows,policies,targetTWD,FX);
+  const withdraw = takeGrowth + takePrincipal;
+  const end = Math.max(0, start + growth - withdraw);
+  p.balance = end;
+  totalAsset += end;
+  totalGrowth += growth;
+  totalWithdraw += withdraw;
+
+  // Compute actual % of target this policy contributed
+  const pctOfTarget = targetUSD > 0 ? (withdraw / targetUSD * 100) : 0;
+  items.push({name:p.name, id:p.id, start, growth, withdraw, end, takeGrowth, takePrincipal, baseStart, pctOfTarget});
+}
+
+// Update need for shortfall reporting
+need = Math.max(0, targetUSD - totalWithdraw);
+
+// ── Lump-sum withdrawals this year ──
+const lumpItems = getLumpsForYear(i+1, policies);
+let lumpTotalUSD = 0;
+for(const lp of lumpItems){
+  const pol = policies.find(p=>p.id===lp.policyId);
+  if(pol){
+    const take = Math.min(lp.amount, pol.balance);
+    pol.balance = Math.max(0, pol.balance - take);
+    lumpTotalUSD += take;
+    // Also subtract from totalAsset
+    totalAsset = Math.max(0, totalAsset - take);
+    lp.actual = take;
+  }
+}
+
+rows.push({
+  year:i+1,
+  roc:rocStart+i,
+  ad:rocStart+i+1911,
+  age:ageStart+i,
+  items,
+  totalAsset,
+  totalGrowth,
+  totalWithdraw,
+  totalTWD:Math.round(totalWithdraw*FX),
+  shortfall:need,
+  lumpItems,
+  lumpTotalUSD,
+  lumpTotalTWD:Math.round(lumpTotalUSD*FX),
+  grandTotalUSD: totalWithdraw + lumpTotalUSD,
+  grandTotalTWD: Math.round((totalWithdraw + lumpTotalUSD)*FX)
+});
+```
+
+}
+
+renderSummary(rows,targetTWD);
+renderTable(rows,policies,FX);
+renderCharts(rows,policies,targetTWD,FX);
 }
 function renderSummary(rows,targetTWD){
-  if(!document.getElementById('summaryStatusInput').value.trim()){
-    const first=rows[0]?.totalAsset||0;
-    const last=rows[rows.length-1]?.totalAsset||0;
-    document.getElementById('summaryStatusInput').value=`本次試算以年領 ${targetTWD.toLocaleString()} TWD 為目標。\n整體期末資產由第1年約 ${Math.round(first).toLocaleString()} USD，推估至最後一年約 ${Math.round(last).toLocaleString()} USD。`;
-  }
-  if(!document.getElementById('summaryStrategyInput').value.trim()){
-    document.getElementById('summaryStrategyInput').value=`此模型依照每張保單設定的「開始承接年」與「提領順位」進行接力。前段由順位較前的保單支應，中段再由後續保單承接，避免所有保單同時被動用。`;
-  }
-  applyManualSummary();
+if(!document.getElementById(‘summaryStatusInput’).value.trim()){
+const first=rows[0]?.totalAsset||0;
+const last=rows[rows.length-1]?.totalAsset||0;
+document.getElementById(‘summaryStatusInput’).value=`本次試算以年領 ${targetTWD.toLocaleString()} TWD 為目標。\n整體期末資產由第1年約 ${Math.round(first).toLocaleString()} USD，推估至最後一年約 ${Math.round(last).toLocaleString()} USD。`;
+}
+if(!document.getElementById(‘summaryStrategyInput’).value.trim()){
+document.getElementById(‘summaryStrategyInput’).value=`此模型依照每張保單設定的「開始承接年」與「提領順位」進行接力。前段由順位較前的保單支應，中段再由後續保單承接，避免所有保單同時被動用。`;
+}
+applyManualSummary();
 }
 function applyManualSummary(){
-  const map=[
-    ['summaryStatusInput','summaryStatus'],
-    ['summaryStrategyInput','summaryStrategy'],
-    ['summaryAdviceInput','summaryAdvice'],
-    ['summaryRiskInput','summaryRisk']
-  ];
-  map.forEach(([i,o])=>{
-    document.getElementById(o).innerHTML=document.getElementById(i).value.trim().replace(/\n/g,'<br>');
-  });
+const map=[
+[‘summaryStatusInput’,‘summaryStatus’],
+[‘summaryStrategyInput’,‘summaryStrategy’],
+[‘summaryAdviceInput’,‘summaryAdvice’],
+[‘summaryRiskInput’,‘summaryRisk’]
+];
+map.forEach(([i,o])=>{
+document.getElementById(o).innerHTML=document.getElementById(i).value.trim().replace(/\n/g,’<br>’);
+});
 }
 function renderTable(rows,policies,FX){
-  let h=`<tr><th rowspan="2" style="text-align:left;color:#b8b0a0;min-width:88px">年度<br>年齡</th>`;
-  policies.forEach((p,idx)=>h+=`<th colspan="5" class="group-start">${p.name}</th>`);
-  h+=`<th colspan="3" class="total-start">整合合計</th><th rowspan="2">狀態</th></tr><tr>`;
-  policies.forEach(()=>h+=`<th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th>`);
-  h+=`<th class="total-start">總資產</th><th>總領USD</th><th>總領TWD</th></tr>`;
-  document.getElementById('thead').innerHTML=h;
+let h=`<tr><th rowspan="2" style="text-align:left;color:#b8b0a0;min-width:88px">年度<br>年齡</th>`;
+policies.forEach((p,idx)=>h+=`<th colspan="5" class="group-start">${p.name}</th>`);
+h+=`<th colspan="3" class="total-start">整合合計</th><th rowspan="2">狀態</th></tr><tr>`;
+policies.forEach(()=>h+=`<th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th>`);
+h+=`<th class="total-start">總資產</th><th>定期領USD</th><th>單筆領USD</th><th>合計領TWD</th></tr>`;
+document.getElementById(‘thead’).innerHTML=h;
 
-  const tb=document.getElementById('tbody');
-  tb.innerHTML='';
-  rows.forEach((r,idx)=>{
-    const tr=document.createElement('tr');
-    // 表格底色統一，不用顏色標示
-    let html=`<td class="yr-cell">${r.roc}年<br><span style="font-size:10px;color:var(--muted)">${r.ad} ${r.age?`${r.age}歲`:''}</span>${r.shortfall>0.5?`<br><span style="font-size:9px;color:var(--red)">缺 ${Math.round(r.shortfall*FX).toLocaleString()}</span>`:''}</td>`;
-    r.items.forEach(it=>{
-      const pct = it.pctOfTarget>0 ? it.pctOfTarget.toFixed(1)+'%' : '—';
-      const pctStyle = it.pctOfTarget>0 ? 'pct-cell' : 'pct-cell" style="color:var(--muted)';
-      html+=`<td class="group-start">${Math.round(it.start).toLocaleString()}</td><td class="ic">＋${Math.round(it.growth).toLocaleString()}</td><td class="wd">${it.withdraw>0?'－'+Math.round(it.withdraw).toLocaleString():'—'}</td><td>${Math.round(it.end).toLocaleString()}</td><td class="${pctStyle}">${pct}</td>`;
-    });
-    const cls=r.totalTWD>=(+document.getElementById('targetTWD').value*0.96)?'twd-ok':(r.totalTWD>=(+document.getElementById('targetTWD').value*0.8)?'twd-ne':'twd-sh');
-    const lumpStr = (r.lumpItems&&r.lumpItems.length>0) ? r.lumpItems.map(lp=>`💰${lp.name} ${Math.round(lp.actual||lp.amount).toLocaleString()}`).join(' ') : '';
-    const note = r.shortfall>0.5 ? `缺口 ${Math.round(r.shortfall*FX).toLocaleString()}` : (idx>0 && r.totalAsset<rows[idx-1].totalAsset ? '資產遞減' : '✓');
-    html+=`<td class="sv-t total-start">${Math.round(r.totalAsset).toLocaleString()}</td><td class="wd">${Math.round(r.totalWithdraw).toLocaleString()}</td><td class="${cls}">${r.totalTWD.toLocaleString()}</td><td class="status-note">${note}${lumpStr?'<br><span style="color:var(--C);font-size:9.5px">'+lumpStr+'</span>':''}</td>`;
-    tr.innerHTML=html;
-    tb.appendChild(tr);
-  });
+const tb=document.getElementById(‘tbody’);
+tb.innerHTML=’’;
+rows.forEach((r,idx)=>{
+const tr=document.createElement(‘tr’);
+// 表格底色統一，不用顏色標示
+let html=`<td class="yr-cell">${r.roc}年<br><span style="font-size:10px;color:var(--muted)">${r.ad} ${r.age?`${r.age}歲`:''}</span>${r.shortfall>0.5?`<br><span style="font-size:9px;color:var(--red)">缺 ${Math.round(r.shortfall*FX).toLocaleString()}</span>`:''}</td>`;
+r.items.forEach(it=>{
+const pct = it.pctOfTarget>0 ? it.pctOfTarget.toFixed(1)+’%’ : ‘—’;
+const pctStyle = it.pctOfTarget>0 ? ‘pct-cell’ : ‘pct-cell” style=“color:var(–muted)’;
+html+=`<td class="group-start">${Math.round(it.start).toLocaleString()}</td><td class="ic">＋${Math.round(it.growth).toLocaleString()}</td><td class="wd">${it.withdraw>0?'－'+Math.round(it.withdraw).toLocaleString():'—'}</td><td>${Math.round(it.end).toLocaleString()}</td><td class="${pctStyle}">${pct}</td>`;
+});
+const targetTWD2 = +document.getElementById(‘targetTWD’).value;
+const grandCls = r.grandTotalTWD>=(targetTWD2*0.96)?‘twd-ok’:(r.grandTotalTWD>=(targetTWD2*0.8)?‘twd-ne’:‘twd-sh’);
+// Lump display: each lump shows policy name + amount
+const lumpStr = (r.lumpItems&&r.lumpItems.length>0)
+? r.lumpItems.filter(lp=>lp.actual>0).map(lp=>`💰${lp.name}<br>${Math.round(lp.actual).toLocaleString()}`).join(’ ’)
+: ‘—’;
+const note = r.shortfall>0.5 ? `缺口 ${Math.round(r.shortfall*FX).toLocaleString()}` : (idx>0 && r.totalAsset<rows[idx-1].totalAsset ? ‘資產遞減’ : ‘✓’);
+html+=` <td class="sv-t total-start">${Math.round(r.totalAsset).toLocaleString()}</td> <td class="wd">${Math.round(r.totalWithdraw).toLocaleString()}</td> <td class="lump-cell" style="font-size:10.5px;line-height:1.4">${lumpStr}</td> <td class="${grandCls}" style="font-weight:900">${r.grandTotalTWD.toLocaleString()}</td> <td class="status-note">${note}</td>`;
+tr.innerHTML=html;
+tb.appendChild(tr);
+});
 
-  const sumUSD=rows.reduce((s,r)=>s+r.totalWithdraw,0);
-  const sumLump=rows.reduce((s,r)=>s+(r.lumpTotalUSD||0),0);
-  const last=rows[rows.length-1];
-  const trG=document.createElement('tr');
-  trG.className='grand';
-  trG.innerHTML=`<td colspan="${1+policies.length*5}" style="text-align:right;font-family:'Noto Sans TC',sans-serif;font-size:10.5px;letter-spacing:.06em">${rows.length} 年累計</td><td>${Math.round(last.totalAsset).toLocaleString()}</td><td>${Math.round(sumUSD).toLocaleString()}</td><td>${Math.round(sumUSD*FX).toLocaleString()}</td><td></td>`;
-  tb.appendChild(trG);
-  if(sumLump>0){
-    const trL=document.createElement('tr');
-    trL.style.background='var(--C-bg)';
-    trL.innerHTML=`<td colspan="${1+policies.length*5+4}" style="font-family:'Noto Sans TC',sans-serif;font-size:11px;font-weight:700;color:var(--C);padding:8px 12px">💰 單筆大額提領合計：USD ${Math.round(sumLump).toLocaleString()} ／ TWD ${Math.round(sumLump*FX).toLocaleString()}</td>`;
-    tb.appendChild(trL);
-  }
+const sumUSD=rows.reduce((s,r)=>s+r.totalWithdraw,0);
+const sumLump=rows.reduce((s,r)=>s+(r.lumpTotalUSD||0),0);
+const sumGrand=rows.reduce((s,r)=>s+(r.grandTotalUSD||0),0);
+const last=rows[rows.length-1];
+const trG=document.createElement(‘tr’);
+trG.className=‘grand’;
+trG.innerHTML=`<td colspan="${1+policies.length*5}" style="text-align:right;font-family:'Noto Sans TC',sans-serif;font-size:10.5px;letter-spacing:.06em">${rows.length} 年累計</td> <td>${Math.round(last.totalAsset).toLocaleString()}</td> <td>${Math.round(sumUSD).toLocaleString()}</td> <td style="color:#f8d870">${Math.round(sumLump).toLocaleString()}</td> <td style="color:#ffc840;font-size:13px">${Math.round(sumGrand*FX).toLocaleString()}</td> <td></td>`;
+tb.appendChild(trG);
 }
 // ── 平滑解約金數列（移除明顯異常低點）──
 function smoothSeries(arr){
-  if(!arr||arr.length===0) return arr;
-  const out = [...arr];
-  for(let i=1;i<out.length-1;i++){
-    const prev=out[i-1]||0, cur=out[i]||0, next=out[i+1]||0;
-    // 如果當前值比前後都低超過40%，視為異常，用前後平均補
-    if(cur < prev*0.6 && cur < next*0.6 && prev>0 && next>0){
-      out[i] = Math.round((prev+next)/2);
-    }
-  }
-  return out;
+if(!arr||arr.length===0) return arr;
+const out = […arr];
+for(let i=1;i<out.length-1;i++){
+const prev=out[i-1]||0, cur=out[i]||0, next=out[i+1]||0;
+// 如果當前值比前後都低超過40%，視為異常，用前後平均補
+if(cur < prev*0.6 && cur < next*0.6 && prev>0 && next>0){
+out[i] = Math.round((prev+next)/2);
+}
+}
+return out;
 }
 
 let _pendingChartData = null;
 function renderCharts(rows,policies,targetTWD,FX){
-  _pendingChartData = {rows,policies,targetTWD,FX};
-  _doRenderCharts({rows,policies,targetTWD,FX});
+_pendingChartData = {rows,policies,targetTWD,FX};
+_doRenderCharts({rows,policies,targetTWD,FX});
 }
 
 function _doRenderCharts({rows,policies,targetTWD,FX}){
-  const labels=rows.map(r=>`${r.roc}`);
-  if(chartPV && chartPV.destroy){ try{chartPV.destroy();}catch(e){} } chartPV=null;
-  if(chartWD && chartWD.destroy){ try{chartWD.destroy();}catch(e){} } chartWD=null;
+const labels=rows.map(r=>`${r.roc}`);
+if(chartPV && chartPV.destroy){ try{chartPV.destroy();}catch(e){} } chartPV=null;
+if(chartWD && chartWD.destroy){ try{chartWD.destroy();}catch(e){} } chartWD=null;
 
-  const pvCanvas = document.getElementById('chartPV');
-  const wdCanvas = document.getElementById('chartWD');
-  if(!pvCanvas||!wdCanvas) return;
+const pvCanvas = document.getElementById(‘chartPV’);
+const wdCanvas = document.getElementById(‘chartWD’);
+if(!pvCanvas||!wdCanvas) return;
 
-  const commonOpts = {
-    responsive:true,
-    maintainAspectRatio:false,
-    animation:{duration:400},
-    plugins:{
-      legend:{labels:{font:{size:11},boxWidth:12,padding:10}},
-      tooltip:{mode:'index',intersect:false}
-    },
-    scales:{
-      x:{ticks:{maxRotation:0,font:{size:10}},grid:{display:false}},
-      y:{ticks:{font:{size:10}},grid:{color:'rgba(0,0,0,0.05)'}}
-    }
-  };
+const commonOpts = {
+responsive:true,
+maintainAspectRatio:false,
+animation:{duration:400},
+plugins:{
+legend:{labels:{font:{size:11},boxWidth:12,padding:10}},
+tooltip:{mode:‘index’,intersect:false}
+},
+scales:{
+x:{ticks:{maxRotation:0,font:{size:10}},grid:{display:false}},
+y:{ticks:{font:{size:10}},grid:{color:‘rgba(0,0,0,0.05)’}}
+}
+};
 
-  chartPV=new Chart(pvCanvas,{
-    type:'line',
-    data:{labels,datasets:policies.map((p,i)=>({
-      label:p.name,
-      data:smoothSeries(rows.map(r=>Math.round(r.items[i]?.end||0))),
-      borderColor:colors[i%colors.length][0],
-      backgroundColor:colors[i%colors.length][1].replace('.55','.10'),
-      pointRadius:3,borderWidth:2,fill:true
-    }))},
-    options:{...commonOpts}
-  });
+chartPV=new Chart(pvCanvas,{
+type:‘line’,
+data:{labels,datasets:policies.map((p,i)=>({
+label:p.name,
+data:smoothSeries(rows.map(r=>Math.round(r.items[i]?.end||0))),
+borderColor:colors[i%colors.length][0],
+backgroundColor:colors[i%colors.length][1].replace(’.55’,’.10’),
+pointRadius:3,borderWidth:2,fill:true
+}))},
+options:{…commonOpts}
+});
 
-  chartWD=new Chart(wdCanvas,{
-    type:'bar',
-    data:{labels,datasets:[
-      ...policies.map((p,i)=>({
-        label:p.name,
-        data:rows.map(r=>Math.round((r.items[i]?.withdraw||0)*FX)),
-        backgroundColor:colors[i%colors.length][1],
-        borderColor:colors[i%colors.length][0],
-        borderWidth:1,borderRadius:2,stack:'s'
-      })),
-      {label:'目標 TWD',data:rows.map(()=>targetTWD),type:'line',
-       borderColor:'#b83030',borderDash:[5,4],pointRadius:0,borderWidth:2,fill:false}
-    ]},
-    options:{...commonOpts,
-      scales:{
-        x:{...commonOpts.scales.x,stacked:true},
-        y:{...commonOpts.scales.y,stacked:true}
-      }
-    }
-  });
+chartWD=new Chart(wdCanvas,{
+type:‘bar’,
+data:{labels,datasets:[
+…policies.map((p,i)=>({
+label:p.name,
+data:rows.map(r=>Math.round((r.items[i]?.withdraw||0)*FX)),
+backgroundColor:colors[i%colors.length][1],
+borderColor:colors[i%colors.length][0],
+borderWidth:1,borderRadius:2,stack:‘s’
+})),
+{label:‘目標 TWD’,data:rows.map(()=>targetTWD),type:‘line’,
+borderColor:’#b83030’,borderDash:[5,4],pointRadius:0,borderWidth:2,fill:false}
+]},
+options:{…commonOpts,
+scales:{
+x:{…commonOpts.scales.x,stacked:true},
+y:{…commonOpts.scales.y,stacked:true}
+}
+}
+});
 }
 
 // Chart is built-in, no CDN load listener needed
@@ -1743,355 +1028,332 @@ function _doRenderCharts({rows,policies,targetTWD,FX}){
 // ── Lump-sum helpers ──────────────────────────────────────────
 let lumpSeq = 0;
 function addLump(data={}){
-  const id = lumpSeq++;
-  const d = Object.assign({year:1, policyNo:'', amount:0, note:''}, data);
-  const grid = document.getElementById('lumpGrid');
-  const div = document.createElement('div');
-  div.className = 'lump-row';
-  div.id = `lump_${id}`;
+const id = lumpSeq++;
+const d = Object.assign({year:1, policyNo:’’, amount:0, note:’’}, data);
+const grid = document.getElementById(‘lumpGrid’);
+const div = document.createElement(‘div’);
+div.className = ‘lump-row’;
+div.id = `lump_${id}`;
 
-  // Build policy options from current policies
-  const pols = [...document.querySelectorAll('.policy-card')].map(c=>{
-    const pid = c.id.replace('policy_','');
-    const nm = document.getElementById(`p_name_${pid}`)?.value||`保單${pid}`;
-    const no = document.getElementById(`p_no_${pid}`)?.value||'';
-    return {pid, nm, no};
-  });
-  const opts = pols.map(p=>`<option value="${p.pid}" ${p.no===d.policyNo||p.pid===d.policyNo?'selected':''}>${p.nm}</option>`).join('');
+// Build policy options from current policies
+const pols = […document.querySelectorAll(’.policy-card’)].map(c=>{
+const pid = c.id.replace(‘policy_’,’’);
+const nm = document.getElementById(`p_name_${pid}`)?.value||`保單${pid}`;
+const no = document.getElementById(`p_no_${pid}`)?.value||’’;
+return {pid, nm, no};
+});
+const opts = pols.map(p=>`<option value="${p.pid}" ${p.no===d.policyNo||p.pid===d.policyNo?'selected':''}>${p.nm}</option>`).join(’’);
 
-  div.innerHTML = `
-    <label>第</label>
-    <input type="number" id="lump_yr_${id}" value="${d.year}" min="1" style="width:48px" onchange="recalc()">
-    <label>年</label>
-    <select id="lump_pol_${id}" style="flex:2;min-width:100px" onchange="recalc()">${opts}</select>
-    <label>額度 USD</label>
-    <input type="number" id="lump_amt_${id}" value="${d.amount}" min="0" onchange="recalc()">
-    <input type="text" id="lump_note_${id}" value="${d.note}" placeholder="用途備註" style="flex:2;min-width:80px" onchange="recalc()">
-    <button class="lump-del" onclick="removeLump(${id})">✕</button>
-  `;
-  grid.appendChild(div);
-  recalc();
+div.innerHTML = `<label>第</label> <input type="number" id="lump_yr_${id}" value="${d.year}" min="1" style="width:48px" onchange="recalc()"> <label>年</label> <select id="lump_pol_${id}" style="flex:2;min-width:100px" onchange="recalc()">${opts}</select> <label>額度 USD</label> <input type="number" id="lump_amt_${id}" value="${d.amount}" min="0" onchange="recalc()"> <input type="text" id="lump_note_${id}" value="${d.note}" placeholder="用途備註" style="flex:2;min-width:80px" onchange="recalc()"> <button class="lump-del" onclick="removeLump(${id})">✕</button>`;
+grid.appendChild(div);
+recalc();
 }
 
 function removeLump(id){
-  const el = document.getElementById(`lump_${id}`);
-  if(el) el.remove();
-  recalc();
+const el = document.getElementById(`lump_${id}`);
+if(el) el.remove();
+recalc();
 }
 
 function getLumpsForYear(yearNum, policies){
-  const result = [];
-  document.querySelectorAll('.lump-row').forEach(row=>{
-    const id = row.id.replace('lump_','');
-    const yr = +document.getElementById(`lump_yr_${id}`)?.value||0;
-    if(yr !== yearNum) return;
-    const polId = document.getElementById(`lump_pol_${id}`)?.value||'';
-    const amt = +document.getElementById(`lump_amt_${id}`)?.value||0;
-    const note = document.getElementById(`lump_note_${id}`)?.value||'';
-    const pol = policies.find(p=>p.id===polId);
-    if(!pol || amt<=0) return;
-    result.push({policyId:polId, name:pol.name, amount:amt, note});
-  });
-  return result;
+const result = [];
+document.querySelectorAll(’.lump-row’).forEach(row=>{
+const id = row.id.replace(‘lump_’,’’);
+const yr = +document.getElementById(`lump_yr_${id}`)?.value||0;
+if(yr !== yearNum) return;
+const polId = document.getElementById(`lump_pol_${id}`)?.value||’’;
+const amt = +document.getElementById(`lump_amt_${id}`)?.value||0;
+const note = document.getElementById(`lump_note_${id}`)?.value||’’;
+const pol = policies.find(p=>p.id===polId);
+if(!pol || amt<=0) return;
+result.push({policyId:polId, name:pol.name, amount:amt, note});
+});
+return result;
 }
 
 // ── Persist: save / load / export ────────────────────────────
 function collectState(){
-  const policies = [...document.querySelectorAll('.policy-card')].map(c=>{
-    const id = c.id.replace('policy_','');
-    return {
-      name:document.getElementById(`p_name_${id}`)?.value||'',
-      company:document.getElementById(`p_company_${id}`)?.value||'',
-      no:document.getElementById(`p_no_${id}`)?.value||'',
-      start:document.getElementById(`p_start_${id}`)?.value||'',
-      rate:document.getElementById(`p_rate_${id}`)?.value||'',
-      floor:document.getElementById(`p_floor_${id}`)?.value||'',
-      mode:document.getElementById(`p_mode_${id}`)?.value||'',
-      startYear:document.getElementById(`p_startYear_${id}`)?.value||'',
-      priority:document.getElementById(`p_priority_${id}`)?.value||'',
-      canPrincipal:document.getElementById(`p_canPrincipal_${id}`)?.value||'',
-      cap:document.getElementById(`p_cap_${id}`)?.value||'',
-      fixed:document.getElementById(`p_fixed_${id}`)?.value||'',
-      growth:document.getElementById(`p_growth_${id}`)?.value||''
-    };
-  });
-  const lumps = [...document.querySelectorAll('.lump-row')].map(row=>{
-    const id = row.id.replace('lump_','');
-    return {
-      year:document.getElementById(`lump_yr_${id}`)?.value||'',
-      policyNo:document.getElementById(`lump_pol_${id}`)?.value||'',
-      amount:document.getElementById(`lump_amt_${id}`)?.value||'',
-      note:document.getElementById(`lump_note_${id}`)?.value||''
-    };
-  });
-  return {
-    clientName:document.getElementById('clientName')?.value||'',
-    clientAge:document.getElementById('clientAge')?.value||'',
-    targetTWD:document.getElementById('targetTWD')?.value||'',
-    years:document.getElementById('years')?.value||'',
-    fx:document.getElementById('fx')?.value||'',
-    rocStart:document.getElementById('rocStart')?.value||'',
-    summaryStatus:document.getElementById('summaryStatusInput')?.value||'',
-    summaryStrategy:document.getElementById('summaryStrategyInput')?.value||'',
-    summaryAdvice:document.getElementById('summaryAdviceInput')?.value||'',
-    summaryRisk:document.getElementById('summaryRiskInput')?.value||'',
-    policies, lumps,
-    savedAt: new Date().toLocaleString('zh-TW')
-  };
+const policies = […document.querySelectorAll(’.policy-card’)].map(c=>{
+const id = c.id.replace(‘policy_’,’’);
+return {
+name:document.getElementById(`p_name_${id}`)?.value||’’,
+company:document.getElementById(`p_company_${id}`)?.value||’’,
+no:document.getElementById(`p_no_${id}`)?.value||’’,
+start:document.getElementById(`p_start_${id}`)?.value||’’,
+rate:document.getElementById(`p_rate_${id}`)?.value||’’,
+floor:document.getElementById(`p_floor_${id}`)?.value||’’,
+mode:document.getElementById(`p_mode_${id}`)?.value||’’,
+startYear:document.getElementById(`p_startYear_${id}`)?.value||’’,
+priority:document.getElementById(`p_priority_${id}`)?.value||’’,
+canPrincipal:document.getElementById(`p_canPrincipal_${id}`)?.value||’’,
+cap:document.getElementById(`p_cap_${id}`)?.value||’’,
+fixed:document.getElementById(`p_fixed_${id}`)?.value||’’,
+growth:document.getElementById(`p_growth_${id}`)?.value||’’
+};
+});
+const lumps = […document.querySelectorAll(’.lump-row’)].map(row=>{
+const id = row.id.replace(‘lump_’,’’);
+return {
+year:document.getElementById(`lump_yr_${id}`)?.value||’’,
+policyNo:document.getElementById(`lump_pol_${id}`)?.value||’’,
+amount:document.getElementById(`lump_amt_${id}`)?.value||’’,
+note:document.getElementById(`lump_note_${id}`)?.value||’’
+};
+});
+return {
+clientName:document.getElementById(‘clientName’)?.value||’’,
+clientAge:document.getElementById(‘clientAge’)?.value||’’,
+targetTWD:document.getElementById(‘targetTWD’)?.value||’’,
+regularStartYear:document.getElementById(‘regularStartYear’)?.value||‘1’,
+years:document.getElementById(‘years’)?.value||’’,
+fx:document.getElementById(‘fx’)?.value||’’,
+rocStart:document.getElementById(‘rocStart’)?.value||’’,
+summaryStatus:document.getElementById(‘summaryStatusInput’)?.value||’’,
+summaryStrategy:document.getElementById(‘summaryStrategyInput’)?.value||’’,
+summaryAdvice:document.getElementById(‘summaryAdviceInput’)?.value||’’,
+summaryRisk:document.getElementById(‘summaryRiskInput’)?.value||’’,
+policies, lumps,
+savedAt: new Date().toLocaleString(‘zh-TW’)
+};
 }
 
 // ── 匯出設定檔 (.json) ──
 function saveAsJson(){
-  try{
-    const state = collectState();
-    const json = JSON.stringify(state, null, 2);
-    const blob = new Blob([json], {type:'application/json;charset=utf-8'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const name = (document.getElementById('clientName')?.value||'保單設定').replace(/\s/g,'_');
-    a.download = `${name}_設定_${new Date().toISOString().slice(0,10)}.json`;
-    // Try download — may be blocked in Claude.ai sandbox
-    try {
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
-    } catch(e) {
-      URL.revokeObjectURL(url);
-      // Fallback: show data in new window
-      const w = window.open('','_blank');
-      if(w){ w.document.write('<pre>'+JSON.stringify(JSON.parse(json),null,2)+'</pre>'); w.document.close(); }
-    }
-    const el = document.getElementById('saveStatus');
-    el.textContent = '✅ 設定檔已下載，請保存到手機/電腦';
-    el.style.color = 'var(--green)';
-    setTimeout(()=>el.textContent='', 5000);
-  }catch(e){
-    alert('匯出失敗：'+e.message);
-  }
+try{
+const state = collectState();
+const json = JSON.stringify(state, null, 2);
+const blob = new Blob([json], {type:‘application/json;charset=utf-8’});
+const url = URL.createObjectURL(blob);
+const a = document.createElement(‘a’);
+a.href = url;
+const name = (document.getElementById(‘clientName’)?.value||‘保單設定’).replace(/\s/g,’_’);
+a.download = `${name}_設定_${new Date().toISOString().slice(0,10)}.json`;
+// Try download — may be blocked in Claude.ai sandbox
+try {
+document.body.appendChild(a);
+a.click();
+setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+} catch(e) {
+URL.revokeObjectURL(url);
+// Fallback: show data in new window
+const w = window.open(’’,’_blank’);
+if(w){ w.document.write(’<pre>’+JSON.stringify(JSON.parse(json),null,2)+’</pre>’); w.document.close(); }
+}
+const el = document.getElementById(‘saveStatus’);
+el.textContent = ‘✅ 設定檔已下載，請保存到手機/電腦’;
+el.style.color = ‘var(–green)’;
+setTimeout(()=>el.textContent=’’, 5000);
+}catch(e){
+alert(‘匯出失敗：’+e.message);
+}
 }
 
 // ── 讀取設定檔 (.json) ──
 function loadFromJson(event){
-  const file = event.target.files[0];
-  if(!file) return;
-  const reader = new FileReader();
-  reader.onload = function(e){
-    try{
-      const state = JSON.parse(e.target.result);
-      if(!confirm(`讀取「${state.clientName||'未知客戶'}」的設定（儲存於 ${state.savedAt||'未知時間'}）？\n目前設定將被取代。`)) return;
-      restoreState(state);
-      const el = document.getElementById('saveStatus');
-      el.textContent = `✅ 已讀取設定檔（${state.savedAt||''}）`;
-      el.style.color = 'var(--B)';
-      setTimeout(()=>el.textContent='', 5000);
-    }catch(err){
-      alert('讀取失敗，請確認是正確的設定檔：'+err.message);
-    }
-  };
-  reader.readAsText(file, 'utf-8');
-  // Reset file input so same file can be re-selected
-  event.target.value = '';
+const file = event.target.files[0];
+if(!file) return;
+const reader = new FileReader();
+reader.onload = function(e){
+try{
+const state = JSON.parse(e.target.result);
+if(!confirm(`讀取「${state.clientName||'未知客戶'}」的設定（儲存於 ${state.savedAt||'未知時間'}）？\n目前設定將被取代。`)) return;
+restoreState(state);
+const el = document.getElementById(‘saveStatus’);
+el.textContent = `✅ 已讀取設定檔（${state.savedAt||''}）`;
+el.style.color = ‘var(–B)’;
+setTimeout(()=>el.textContent=’’, 5000);
+}catch(err){
+alert(‘讀取失敗，請確認是正確的設定檔：’+err.message);
+}
+};
+reader.readAsText(file, ‘utf-8’);
+// Reset file input so same file can be re-selected
+event.target.value = ‘’;
 }
 
 // 舊函數保留相容性
 function saveToLocal(){ saveAsJson(); }
-function loadFromLocal(){ alert('請使用「讀取設定檔」按鈕選擇之前下載的 .json 檔'); }
+function loadFromLocal(){ alert(‘請使用「讀取設定檔」按鈕選擇之前下載的 .json 檔’); }
 
 function restoreState(state){
-  if(state.clientName) document.getElementById('clientName').value = state.clientName;
-  if(state.clientAge)  document.getElementById('clientAge').value  = state.clientAge;
-  if(state.targetTWD)  document.getElementById('targetTWD').value  = state.targetTWD;
-  if(state.years)      document.getElementById('years').value      = state.years;
-  if(state.fx)         document.getElementById('fx').value         = state.fx;
-  if(state.rocStart)   document.getElementById('rocStart').value   = state.rocStart;
-  if(state.summaryStatus)   document.getElementById('summaryStatusInput').value   = state.summaryStatus;
-  if(state.summaryStrategy) document.getElementById('summaryStrategyInput').value = state.summaryStrategy;
-  if(state.summaryAdvice)   document.getElementById('summaryAdviceInput').value   = state.summaryAdvice;
-  if(state.summaryRisk)     document.getElementById('summaryRiskInput').value     = state.summaryRisk;
+if(state.clientName) document.getElementById(‘clientName’).value = state.clientName;
+if(state.clientAge)  document.getElementById(‘clientAge’).value  = state.clientAge;
+if(state.targetTWD)       document.getElementById(‘targetTWD’).value        = state.targetTWD;
+if(state.regularStartYear && document.getElementById(‘regularStartYear’))
+document.getElementById(‘regularStartYear’).value = state.regularStartYear;
+if(state.years)      document.getElementById(‘years’).value      = state.years;
+if(state.fx)         document.getElementById(‘fx’).value         = state.fx;
+if(state.rocStart)   document.getElementById(‘rocStart’).value   = state.rocStart;
+if(state.summaryStatus)   document.getElementById(‘summaryStatusInput’).value   = state.summaryStatus;
+if(state.summaryStrategy) document.getElementById(‘summaryStrategyInput’).value = state.summaryStrategy;
+if(state.summaryAdvice)   document.getElementById(‘summaryAdviceInput’).value   = state.summaryAdvice;
+if(state.summaryRisk)     document.getElementById(‘summaryRiskInput’).value     = state.summaryRisk;
 
-  document.getElementById('policyList').innerHTML = '';
-  policySeq = 0;
-  (state.policies||[]).forEach(p => addPolicy(p));
+document.getElementById(‘policyList’).innerHTML = ‘’;
+policySeq = 0;
+(state.policies||[]).forEach(p => addPolicy(p));
 
-  document.getElementById('lumpGrid').innerHTML = '';
-  lumpSeq = 0;
-  (state.lumps||[]).forEach(l => addLump(l));
+document.getElementById(‘lumpGrid’).innerHTML = ‘’;
+lumpSeq = 0;
+(state.lumps||[]).forEach(l => addLump(l));
 
-  syncHeader();
-  rebuildAllRatioGrids();
-  recalc();
+syncHeader();
+setTimeout(()=>{
+rebuildAllRatioGrids();
+recalc();
+}, 100);
 }
 
 function printPage(){
-  // In Claude.ai artifact iframe, window.print() may be blocked.
-  // Try multiple approaches.
-  try {
-    // First: try direct print
-    if(window.self === window.top){
-      window.print();
-    } else {
-      // We're in an iframe — open a new window with current HTML and print
-      const html = document.documentElement.outerHTML;
-      const win = window.open('','_blank');
-      if(win){
-        win.document.write(html);
-        win.document.close();
-        win.focus();
-        setTimeout(()=>{ win.print(); }, 800);
-      } else {
-        // Fallback: export HTML instead
-        alert('列印功能在此環境受限。\n\n請改用「匯出 HTML 檔案」，下載後在瀏覽器開啟，再按 Cmd+P（Mac）或 Ctrl+P（Windows）列印/存成 PDF。');
-      }
-    }
-  } catch(e) {
-    alert('列印功能在此環境受限。\n\n請改用「匯出 HTML 檔案」，下載後在瀏覽器開啟，再按 Cmd+P 或 Ctrl+P 列印/存成 PDF。');
-  }
+// In Claude.ai artifact iframe, window.print() may be blocked.
+// Try multiple approaches.
+try {
+// First: try direct print
+if(window.self === window.top){
+window.print();
+} else {
+// We’re in an iframe — open a new window with current HTML and print
+const html = document.documentElement.outerHTML;
+const win = window.open(’’,’_blank’);
+if(win){
+win.document.write(html);
+win.document.close();
+win.focus();
+setTimeout(()=>{ win.print(); }, 800);
+} else {
+// Fallback: export HTML instead
+alert(‘列印功能在此環境受限。\n\n請改用「匯出 HTML 檔案」，下載後在瀏覽器開啟，再按 Cmd+P（Mac）或 Ctrl+P（Windows）列印/存成 PDF。’);
+}
+}
+} catch(e) {
+alert(‘列印功能在此環境受限。\n\n請改用「匯出 HTML 檔案」，下載後在瀏覽器開啟，再按 Cmd+P 或 Ctrl+P 列印/存成 PDF。’);
+}
 }
 
 function exportHTML(){
-  // Auto-save first, then export current page as standalone HTML
-  const state = collectState();
-  const stateJson = JSON.stringify(state).replace(/</g,'\u003c');
-  const blob = new Blob([
-    document.documentElement.outerHTML.replace(
-      '<script>
-// Auto-restore on load
-window.addEventListener('DOMContentLoaded',function(){
-  try{
-    const s={"clientName":"陳志強","clientAge":"65","targetTWD":"400000","years":"20","fx":"30","rocStart":"117","summaryStatus":"本次試算以年領 400,000 TWD 為目標。\n整體期末資產由第1年約 498,706 USD，推估至最後一年約 497,359 USD。","summaryStrategy":"此模型依照每張保單設定的「開始承接年」與「提領順位」進行接力。前段由順位較前的保單支應，中段再由後續保單承接，避免所有保單同時被動用。","summaryAdvice":"","summaryRisk":"","policies":[{"name":"金價美 FDD","company":"全球人壽","no":"7001355710","start":"512039","rate":"2.8","floor":"0","mode":"hybrid","startYear":"1","priority":"1","canPrincipal":"1","cap":"0","fixed":"512039,515024,517960,520874,523759,526612,529426,532136,534804,537426,540001,542527,545011,547441,549813,552123","growth":"0,0,0,0,12361,12739,13127,13937,14791,15691,16159,16638,17129,17632,18149,18679"},{"name":"非常美 FGD","company":"全球人壽","no":"88000792170","start":"89653","rate":"4.2","floor":"0","mode":"hybrid","startYear":"4","priority":"2","canPrincipal":"1","cap":"0","fixed":"89653,96731,98025,99343,100684,102030,103367,104795,106266,107787,110000,112513,114120,116402,117380,119031,120694,122368,124053,125747","growth":"0,0,0,0,0,0,2595,2700,2809,2923,3043,3165,3208,3252,3299,3346,3395,3443"},{"name":"萬事利達(陳怡亘)","company":"保誠人壽","no":"81224035","start":"35200","rate":"3.2","floor":"0","mode":"hybrid","startYear":"5","priority":"3","canPrincipal":"1","cap":"0","fixed":"35200,48435,63078,66074,73117,76317,141051,147617,153645,159842,165523,170938,176092,180987,185657,190100,194317,199906,205369,210406,215179,219574,223962,227983,231790,235476,238842,242719,249978,253222","growth":"0,13235,14643,2996,7043,3200,64734,6566,6028,6197,5681,5415,5154,4895,4670,4443,4217,5589,5463,5037,4773,4395,4388,4021,3807,3686,3366,3877,7259,3244"},{"name":"萬事利達(陳韋庭)","company":"保誠人壽","no":"81215039","start":"34800","rate":"3.2","floor":"0","mode":"hybrid","startYear":"6","priority":"4","canPrincipal":"1","cap":"0","fixed":"34800,47850,62650,65364,71958,75468,137648,142726,147334,151802,156134,159926,163696,196979,170193,173140,175917,17388,200225,209573,214009,218090","growth":"0,13050,14800,2714,6594,3510,62180,5078,4608,4468,4332,3792,3770,33283,0,2947,2777,0,182837,9348,4436,4081"},{"name":"萬事利達(陳加綺)","company":"保誠人壽","no":"81224053","start":"36020","rate":"3.2","floor":"0","mode":"hybrid","startYear":"7","priority":"5","canPrincipal":"1","cap":"0","fixed":"36020,67120,74414,77470,143208,149938,156260,162457,168266,176760,179213,184025,188595,193043,197390,202732,207652,212455,216871,220969,224752,228290,231462,234449,237283,240147,242785,245168,247280,249144","growth":"0,31100,7294,3056,65738,6730,6322,6197,5809,8494,2453,4812,4570,4448,4347,5342,4920,4803,4416,4098,3783,3538,3172,2987,2834,2864,2638,2383,2112,1864"},{"name":"萬事利達(陳志強本人)","company":"保誠人壽","no":"81215001","start":"23598","rate":"3","floor":"0","mode":"hybrid","startYear":"8","priority":"6","canPrincipal":"1","cap":"0","fixed":"23598,32348,42026,43344,47082,48532,64555,66718,68604,70319,71842,73085,74146,74982,75659,76120,76413,76562","growth":"0,8750,9678,1318,3738,1450,16023,2163,1886,1715,1523,1243,1061,836,677,461,293,149"},{"name":"萬事利達2(陳韋庭)","company":"保誠人壽","no":"81224099","start":"17766","rate":"3.2","floor":"0","mode":"hybrid","startYear":"9","priority":"7","canPrincipal":"1","cap":"0","fixed":"17766,24429,31832,33330,36737,38529,70273,37411,76144,73411,76144,78674,80997,85911,84680,86090,87333,88326,89110,89871,89871","growth":"0,6663,7403,1498,3407,1792,31744,0,38733,0,2733,2530,2323,4914,0,1410,1243,993,784,761,0"}],"lumps":[{"year":"1","policyNo":"0","amount":"80000","note":""},{"year":"2","policyNo":"0","amount":"75000","note":""},{"year":"3","policyNo":"0","amount":"100000","note":""},{"year":"1","policyNo":"0","amount":"0","note":""}],"savedAt":"2026/4/30 下午3:12:45"};
-    // inject into localStorage
-    localStorage.setItem('policyApp_state', JSON.stringify(s));
-    restoreState(s);
-  }catch(e){console.error(e);}
-});
-</script></body>',
-      `<script>
-// Auto-restore on load
-window.addEventListener('DOMContentLoaded',function(){
-  try{
-    const s=${stateJson};
-    // inject into localStorage
-    localStorage.setItem('policyApp_state', JSON.stringify(s));
-    restoreState(s);
-  }catch(e){console.error(e);}
-});
-<\/script></body>`
-    )
-  ], {type:'text/html;charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  const rawName = (document.getElementById('clientName')?.value||'保單試算');
-  const name = rawName.replace(/[\s\u4e00-\u9fff]/g, c => encodeURIComponent(c).replace(/%/g,''));
-  a.download = `policy_${rawName}_${new Date().toISOString().slice(0,10)}.html`;
-  try {
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
-  } catch(e) {
-    // Open in new tab as fallback
-    window.open(url,'_blank');
-    setTimeout(()=>URL.revokeObjectURL(url), 5000);
-  }
+// Auto-save first, then export current page as standalone HTML
+const state = collectState();
+const stateJson = JSON.stringify(state).replace(/</g,’\u003c’);
+const blob = new Blob([
+document.documentElement.outerHTML.replace(
+‘</body>’,
+`<script> // Auto-restore on load window.addEventListener('DOMContentLoaded',function(){ try{ const s=${stateJson}; // inject into localStorage localStorage.setItem('policyApp_state', JSON.stringify(s)); restoreState(s); }catch(e){console.error(e);} }); <\/script></body>`
+)
+], {type:‘text/html;charset=utf-8’});
+const url = URL.createObjectURL(blob);
+const a = document.createElement(‘a’);
+a.href = url;
+const rawName = (document.getElementById(‘clientName’)?.value||‘保單試算’);
+const name = rawName.replace(/[\s\u4e00-\u9fff]/g, c => encodeURIComponent(c).replace(/%/g,’’));
+a.download = `policy_${rawName}_${new Date().toISOString().slice(0,10)}.html`;
+try {
+document.body.appendChild(a);
+a.click();
+setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+} catch(e) {
+// Open in new tab as fallback
+window.open(url,’_blank’);
+setTimeout(()=>URL.revokeObjectURL(url), 5000);
+}
 }
 
 // Auto-save removed (localStorage not available in all environments)
-// Use "匯出設定檔" button to save your work
+// Use “匯出設定檔” button to save your work
 
 function resetDefault(){
-  document.getElementById('policyList').innerHTML='';
-  document.getElementById('lumpGrid').innerHTML='';
-  policySeq=0; lumpSeq=0;
+document.getElementById(‘policyList’).innerHTML=’’;
+document.getElementById(‘lumpGrid’).innerHTML=’’;
+policySeq=0; lumpSeq=0;
 
-  // ═══════════════════════════════════════════════════════════════
-  // 陳志強 民國41年10月 現齡83歲
-  // 所有保單數字皆為美金(USD)，直接填入
-  // 2021/09、2021/11投保者現為保單第4年末
-  // 2022/01投保金價美現為第3年末
-  // 2025/05投保非常美現為第1年末
-  // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// 陳志強 民國41年10月 現齡83歲
+// 所有保單數字皆為美金(USD)，直接填入
+// 2021/09、2021/11投保者現為保單第4年末
+// 2022/01投保金價美現為第3年末
+// 2025/05投保非常美現為第1年末
+// ═══════════════════════════════════════════════════════════════
 
-  // ── 保單1：金價美 FDD 7001355710（全球人壽）──
-  // 2022/01投保，躉繳525,390 USD，被保人虛擬名=陳志強
-  // 現第3年末，解約金512,039 USD
-  // 解約金(B欄，USD)從yr3起(PDF讀取):
-  addPolicy({
-    name:'金價美 FDD',company:'全球人壽',no:'7001355710',
-    start:512039,rate:2.8,mode:'hybrid',
-    fixed:'512039,515024,517960,520874,523759,526612,529426,532136,534804,537426,540001,542527,545011,547441,549813,552123',
-    growth:'0,0,0,0,12361,12739,13127,13937,14791,15691,16159,16638,17129,17632,18149,18679',
-    startYear:1,priority:1,canPrincipal:'1',floor:0,cap:0
-  });
+// ── 保單1：金價美 FDD 7001355710（全球人壽）──
+// 2022/01投保，躉繳525,390 USD，被保人虛擬名=陳志強
+// 現第3年末，解約金512,039 USD
+// 解約金(B欄，USD)從yr3起(PDF讀取):
+addPolicy({
+name:‘金價美 FDD’,company:‘全球人壽’,no:‘7001355710’,
+start:512039,rate:2.8,mode:‘hybrid’,
+fixed:‘512039,515024,517960,520874,523759,526612,529426,532136,534804,537426,540001,542527,545011,547441,549813,552123’,
+growth:‘0,0,0,0,12361,12739,13127,13937,14791,15691,16159,16638,17129,17632,18149,18679’,
+startYear:1,priority:1,canPrincipal:‘1’,floor:0,cap:0
+});
 
-  // ── 保單2：非常美 FGD 88000792170（全球人壽）──
-  // 2025/05投保，躉繳100,450 USD，宣告4.20%，增值回饋=儲存生息
-  // 現第1年末，解約金89,653 USD
-  // 解約金(B欄，USD)逐年(PDF讀取):
-  addPolicy({
-    name:'非常美 FGD',company:'全球人壽',no:'88000792170',
-    start:89653,rate:4.2,mode:'hybrid',
-    fixed:'89653,96731,98025,99343,100684,102030,103367,104795,106266,107787,110000,112513,114120,116402,117380,119031,120694,122368,124053,125747',
-    growth:'0,0,0,0,0,0,2595,2700,2809,2923,3043,3165,3208,3252,3299,3346,3395,3443',
-    startYear:4,priority:2,canPrincipal:'1',floor:0,cap:0
-  });
+// ── 保單2：非常美 FGD 88000792170（全球人壽）──
+// 2025/05投保，躉繳100,450 USD，宣告4.20%，增值回饋=儲存生息
+// 現第1年末，解約金89,653 USD
+// 解約金(B欄，USD)逐年(PDF讀取):
+addPolicy({
+name:‘非常美 FGD’,company:‘全球人壽’,no:‘88000792170’,
+start:89653,rate:4.2,mode:‘hybrid’,
+fixed:‘89653,96731,98025,99343,100684,102030,103367,104795,106266,107787,110000,112513,114120,116402,117380,119031,120694,122368,124053,125747’,
+growth:‘0,0,0,0,0,0,2595,2700,2809,2923,3043,3165,3208,3252,3299,3346,3395,3443’,
+startYear:4,priority:2,canPrincipal:‘1’,floor:0,cap:0
+});
 
-  // ── 保單3：萬事利達 81224035（保誠人壽）被保人：陳怡亘 31歲起 ──
-  // 2021/11投保，年繳124,200 USD，現第4年末
-  // 解約金(USD)逐年完整資料，從yr4起:
-  addPolicy({
-    name:'萬事利達(陳怡亘)',company:'保誠人壽',no:'81224035',
-    start:35200,rate:3.2,mode:'hybrid',
-    fixed:'35200,48435,63078,66074,73117,76317,141051,147617,153645,159842,165523,170938,176092,180987,185657,190100,194317,199906,205369,210406,215179,219574,223962,227983,231790,235476,238842,242719,249978,253222',
-    growth:'0,13235,14643,2996,7043,3200,64734,6566,6028,6197,5681,5415,5154,4895,4670,4443,4217,5589,5463,5037,4773,4395,4388,4021,3807,3686,3366,3877,7259,3244',
-    startYear:5,priority:3,canPrincipal:'1',floor:0,cap:0
-  });
+// ── 保單3：萬事利達 81224035（保誠人壽）被保人：陳怡亘 31歲起 ──
+// 2021/11投保，年繳124,200 USD，現第4年末
+// 解約金(USD)逐年完整資料，從yr4起:
+addPolicy({
+name:‘萬事利達(陳怡亘)’,company:‘保誠人壽’,no:‘81224035’,
+start:35200,rate:3.2,mode:‘hybrid’,
+fixed:‘35200,48435,63078,66074,73117,76317,141051,147617,153645,159842,165523,170938,176092,180987,185657,190100,194317,199906,205369,210406,215179,219574,223962,227983,231790,235476,238842,242719,249978,253222’,
+growth:‘0,13235,14643,2996,7043,3200,64734,6566,6028,6197,5681,5415,5154,4895,4670,4443,4217,5589,5463,5037,4773,4395,4388,4021,3807,3686,3366,3877,7259,3244’,
+startYear:5,priority:3,canPrincipal:‘1’,floor:0,cap:0
+});
 
-  // ── 保單4：萬事利達 81215039（保誠人壽）被保人：陳韋庭 29歲起 ──
-  // 2021/09投保，年繳121,080 USD，現第4年末
-  addPolicy({
-    name:'萬事利達(陳韋庭)',company:'保誠人壽',no:'81215039',
-    start:34800,rate:3.2,mode:'hybrid',
-    fixed:'34800,47850,62650,65364,71958,75468,137648,142726,147334,151802,156134,159926,163696,196979,170193,173140,175917,17388,200225,209573,214009,218090',
-    growth:'0,13050,14800,2714,6594,3510,62180,5078,4608,4468,4332,3792,3770,33283,0,2947,2777,0,182837,9348,4436,4081',
-    startYear:6,priority:4,canPrincipal:'1',floor:0,cap:0
-  });
+// ── 保單4：萬事利達 81215039（保誠人壽）被保人：陳韋庭 29歲起 ──
+// 2021/09投保，年繳121,080 USD，現第4年末
+addPolicy({
+name:‘萬事利達(陳韋庭)’,company:‘保誠人壽’,no:‘81215039’,
+start:34800,rate:3.2,mode:‘hybrid’,
+fixed:‘34800,47850,62650,65364,71958,75468,137648,142726,147334,151802,156134,159926,163696,196979,170193,173140,175917,17388,200225,209573,214009,218090’,
+growth:‘0,13050,14800,2714,6594,3510,62180,5078,4608,4468,4332,3792,3770,33283,0,2947,2777,0,182837,9348,4436,4081’,
+startYear:6,priority:4,canPrincipal:‘1’,floor:0,cap:0
+});
 
-  // ── 保單5：萬事利達 81224053（保誠人壽）被保人：陳加綺 27歲起 ──
-  // 2021/11投保，年繳126,000 USD，現第4年末
-  addPolicy({
-    name:'萬事利達(陳加綺)',company:'保誠人壽',no:'81224053',
-    start:36020,rate:3.2,mode:'hybrid',
-    fixed:'36020,67120,74414,77470,143208,149938,156260,162457,168266,176760,179213,184025,188595,193043,197390,202732,207652,212455,216871,220969,224752,228290,231462,234449,237283,240147,242785,245168,247280,249144',
-    growth:'0,31100,7294,3056,65738,6730,6322,6197,5809,8494,2453,4812,4570,4448,4347,5342,4920,4803,4416,4098,3783,3538,3172,2987,2834,2864,2638,2383,2112,1864',
-    startYear:7,priority:5,canPrincipal:'1',floor:0,cap:0
-  });
+// ── 保單5：萬事利達 81224053（保誠人壽）被保人：陳加綺 27歲起 ──
+// 2021/11投保，年繳126,000 USD，現第4年末
+addPolicy({
+name:‘萬事利達(陳加綺)’,company:‘保誠人壽’,no:‘81224053’,
+start:36020,rate:3.2,mode:‘hybrid’,
+fixed:‘36020,67120,74414,77470,143208,149938,156260,162457,168266,176760,179213,184025,188595,193043,197390,202732,207652,212455,216871,220969,224752,228290,231462,234449,237283,240147,242785,245168,247280,249144’,
+growth:‘0,31100,7294,3056,65738,6730,6322,6197,5809,8494,2453,4812,4570,4448,4347,5342,4920,4803,4416,4098,3783,3538,3172,2987,2834,2864,2638,2383,2112,1864’,
+startYear:7,priority:5,canPrincipal:‘1’,floor:0,cap:0
+});
 
-  // ── 保單6：萬事利達 81215001（保誠人壽）被保人：陳志強本人 61歲起 ──
-  // 2021/09投保，年繳63,000 USD，繳至81歲，現第4年末
-  addPolicy({
-    name:'萬事利達(陳志強本人)',company:'保誠人壽',no:'81215001',
-    start:23598,rate:3.0,mode:'hybrid',
-    fixed:'23598,32348,42026,43344,47082,48532,64555,66718,68604,70319,71842,73085,74146,74982,75659,76120,76413,76562',
-    growth:'0,8750,9678,1318,3738,1450,16023,2163,1886,1715,1523,1243,1061,836,677,461,293,149',
-    startYear:8,priority:6,canPrincipal:'1',floor:0,cap:0
-  });
+// ── 保單6：萬事利達 81215001（保誠人壽）被保人：陳志強本人 61歲起 ──
+// 2021/09投保，年繳63,000 USD，繳至81歲，現第4年末
+addPolicy({
+name:‘萬事利達(陳志強本人)’,company:‘保誠人壽’,no:‘81215001’,
+start:23598,rate:3.0,mode:‘hybrid’,
+fixed:‘23598,32348,42026,43344,47082,48532,64555,66718,68604,70319,71842,73085,74146,74982,75659,76120,76413,76562’,
+growth:‘0,8750,9678,1318,3738,1450,16023,2163,1886,1715,1523,1243,1061,836,677,461,293,149’,
+startYear:8,priority:6,canPrincipal:‘1’,floor:0,cap:0
+});
 
-  // ── 保單7：萬事利達 81224099（保誠人壽）被保人：陳韋庭第2張 29歲起 ──
-  // 2021/09投保，年繳62,442 USD，現第4年末
-  addPolicy({
-    name:'萬事利達2(陳韋庭)',company:'保誠人壽',no:'81224099',
-    start:17766,rate:3.2,mode:'hybrid',
-    fixed:'17766,24429,31832,33330,36737,38529,70273,37411,76144,73411,76144,78674,80997,85911,84680,86090,87333,88326,89110,89871,89871',
-    growth:'0,6663,7403,1498,3407,1792,31744,0,38733,0,2733,2530,2323,4914,0,1410,1243,993,784,761,0',
-    startYear:9,priority:7,canPrincipal:'1',floor:0,cap:0
-  });
+// ── 保單7：萬事利達 81224099（保誠人壽）被保人：陳韋庭第2張 29歲起 ──
+// 2021/09投保，年繳62,442 USD，現第4年末
+addPolicy({
+name:‘萬事利達2(陳韋庭)’,company:‘保誠人壽’,no:‘81224099’,
+start:17766,rate:3.2,mode:‘hybrid’,
+fixed:‘17766,24429,31832,33330,36737,38529,70273,37411,76144,73411,76144,78674,80997,85911,84680,86090,87333,88326,89110,89871,89871’,
+growth:‘0,6663,7403,1498,3407,1792,31744,0,38733,0,2733,2530,2323,4914,0,1410,1243,993,784,761,0’,
+startYear:9,priority:7,canPrincipal:‘1’,floor:0,cap:0
+});
 
-  rebuildAllRatioGrids();
+rebuildAllRatioGrids();
 }
 setToday();
 syncHeader();
 resetDefault();
 </script>
 
-</body></html>
+</body>
+</html>
