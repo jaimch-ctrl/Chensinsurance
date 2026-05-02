@@ -4,82 +4,89 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>多保單整合智能試算｜陳志強</title>
+<title>多保單整合智能試算｜8陳志強</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=DM+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script>
-// ══════════════════════════════════════════════════════════
-// SvgChart v3 — 純SVG，零依賴，GitHub Pages / Claude.ai 均可用
-// ══════════════════════════════════════════════════════════
+// SvgChart — 純SVG，直接渲染到容器，GitHub Pages/Claude.ai/iframe 全相容
 (function(g){
-  function niceMax(v){
-    if(v<=0) return 10;
-    var m=Math.pow(10,Math.floor(Math.log10(v)));
-    var s=[1,2,2.5,5,10];
-    for(var i=0;i<s.length;i++){ if(s[i]*m>=v) return s[i]*m; }
-    return v*1.2;
-  }
-  function esc(s){ return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  var ALL = []; // 所有圖表實例，resize 時重繪
 
-function drawSVG(holder, config){
-var W = Math.max(holder.getBoundingClientRect().width||0, holder.offsetWidth||0, 260);
-var H = 200;
-var P = {t:14,r:12,b:40,l:52};
-var gW=W-P.l-P.r, gH=H-P.t-P.b;
-var type=config.type||‘line’;
-var labels=config.data.labels||[];
-var dsets=config.data.datasets||[];
-var n=labels.length; if(!n){ holder.innerHTML=’’; return; }
+function nice(v){
+if(v<=0) return 10;
+var m=Math.pow(10,Math.floor(Math.log10(v)));
+for(var *,s=[1,2,2.5,5,10],i=0;i<s.length;i++) if((*=s[i]*m)>=v) return _;
+return v*1.2;
+}
+function e(s){ return (’’+s).replace(/&/g,’&’).replace(/</g,’<’).replace(/>/g,’>’); }
+
+function draw(el, cfg){
+if(!el) return;
+var W = el.getBoundingClientRect().width;
+if(!W || W < 10) W = el.offsetWidth || el.clientWidth || 0;
+if(!W || W < 10){
+// 嘗試父容器
+var p = el.parentElement;
+while(p){ W = p.getBoundingClientRect().width || p.offsetWidth; if(W>10) break; p=p.parentElement; }
+}
+if(!W || W < 10) W = 300; // 最終後備
 
 ```
-// Y range
-var yMin=0,yMax=0;
+var H=200, P={t:14,r:12,b:40,l:52};
+var gW=W-P.l-P.r, gH=H-P.t-P.b;
+var type=cfg.type||'line';
+var labels=cfg.data.labels||[];
+var dsets=cfg.data.datasets||[];
+var n=labels.length; if(!n){ el.innerHTML=''; return; }
+
+// Y 範圍
+var yMin=0, yMax=0;
 if(type==='bar'){
   for(var i=0;i<n;i++){
-    var s=0;
-    dsets.forEach(function(d){ if(d.type!=='line') s+=(+d.data[i]||0); });
+    var s=0; dsets.forEach(function(d){ if(d.type!=='line') s+=(+d.data[i]||0); });
     if(s>yMax) yMax=s;
     dsets.forEach(function(d){ if(d.type==='line'){ var v=+d.data[i]||0; yMax=Math.max(yMax,v); yMin=Math.min(yMin,v); }});
   }
 } else {
   dsets.forEach(function(d){ (d.data||[]).forEach(function(v){ v=+v||0; yMax=Math.max(yMax,v); yMin=Math.min(yMin,v); }); });
 }
-yMax=niceMax(yMax); if(yMin<0) yMin=-niceMax(-yMin);
+yMax=nice(yMax); if(yMin<0) yMin=-nice(-yMin);
+if(yMax===yMin) yMax=yMin+1;
 
 function sy(v){ return P.t+gH*(1-(v-yMin)/(yMax-yMin)); }
 function sx(i){ return P.l+(i+0.5)/n*gW; }
 
-var o=[]; // svg parts
-o.push('<svg xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" style="display:block;overflow:visible">');
+var o=[];
+o.push('<svg xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" style="display:block;overflow:visible;max-width:100%">');
 
-// grid + y labels
+// Grid + Y 標籤
 for(var t=0;t<=5;t++){
   var v=yMin+t*(yMax-yMin)/5, y0=sy(v);
   o.push('<line x1="'+P.l+'" y1="'+y0+'" x2="'+(P.l+gW)+'" y2="'+y0+'" stroke="#ddd" stroke-width="1"/>');
   var lbl=Math.abs(v)>=10000?Math.round(v/1000)+'k':Math.abs(v)>=1000?(v/1000).toFixed(1)+'k':Math.round(v)+'';
-  o.push('<text x="'+(P.l-4)+'" y="'+(y0+3)+'" text-anchor="end" font-size="9" fill="#888">'+esc(lbl)+'</text>');
+  o.push('<text x="'+(P.l-4)+'" y="'+(y0+3)+'" text-anchor="end" font-size="9" fill="#888">'+e(lbl)+'</text>');
 }
 
-// x labels
+// X 標籤
 var stepL=Math.max(1,Math.ceil(n/Math.floor(gW/26)));
 labels.forEach(function(lb,i){
   if(i%stepL!==0) return;
-  o.push('<text x="'+sx(i)+'" y="'+(H-P.b+13)+'" text-anchor="middle" font-size="9" fill="#666">'+esc(lb)+'</text>');
+  o.push('<text x="'+sx(i)+'" y="'+(H-P.b+13)+'" text-anchor="middle" font-size="9" fill="#666">'+e(lb)+'</text>');
 });
 
-// bars
+// 長條圖
 if(type==='bar'){
-  var barW=Math.max(2,gW/n*0.62);
+  var bW=Math.max(2,gW/n*0.62);
   var bases=labels.map(function(){ return sy(0); });
   dsets.filter(function(d){ return d.type!=='line'; }).forEach(function(d){
     d.data.forEach(function(v,i){
       v=+v||0; if(!v) return;
       var bH=bases[i]-sy(v);
-      if(bH>0){ o.push('<rect x="'+(sx(i)-barW/2)+'" y="'+(bases[i]-bH)+'" width="'+barW+'" height="'+bH+'" fill="'+(d.backgroundColor||'#888')+'"/>'); bases[i]-=bH; }
+      if(bH>0){ o.push('<rect x="'+(sx(i)-bW/2)+'" y="'+(bases[i]-bH)+'" width="'+bW+'" height="'+bH+'" fill="'+(d.backgroundColor||'#888')+'"/>'); bases[i]-=bH; }
     });
   });
 }
 
-// lines
+// 折線圖
 var lds=type==='line'?dsets:dsets.filter(function(d){ return d.type==='line'; });
 lds.forEach(function(d){
   var pts=[];
@@ -87,52 +94,75 @@ lds.forEach(function(d){
   if(!pts.length) return;
   var da=d.borderDash?'stroke-dasharray="'+d.borderDash.join(' ')+'"':'';
   o.push('<polyline points="'+pts.join(' ')+'" fill="none" stroke="'+(d.borderColor||'#333')+'" stroke-width="'+(d.borderWidth||2)+'" '+da+'/>');
-  if(d.pointRadius){ pts=[]; (d.data||[]).forEach(function(v,i){ if(v!=null) o.push('<circle cx="'+sx(i)+'" cy="'+sy(+v)+'" r="'+d.pointRadius+'" fill="'+(d.borderColor||'#333')+'"/>'); }); }
+  if(d.pointRadius){ (d.data||[]).forEach(function(v,i){ if(v!=null) o.push('<circle cx="'+sx(i)+'" cy="'+sy(+v)+'" r="'+d.pointRadius+'" fill="'+(d.borderColor||'#333')+'"/>'); }); }
 });
 
-// legend (bottom)
+// 圖例
 var lx=P.l, ly=H-4;
 dsets.filter(function(d){ return d.label; }).forEach(function(d){
   var col=d.borderColor||d.backgroundColor||'#888';
   var tw=d.label.length*5.2+18;
   if(lx+tw>W-P.r){ lx=P.l; ly-=13; }
   o.push('<rect x="'+lx+'" y="'+(ly-7)+'" width="9" height="7" fill="'+col+'"/>');
-  o.push('<text x="'+(lx+12)+'" y="'+ly+'" font-size="9" fill="#444">'+esc(d.label)+'</text>');
+  o.push('<text x="'+(lx+12)+'" y="'+ly+'" font-size="9" fill="#444">'+e(d.label)+'</text>');
   lx+=tw;
 });
 
 o.push('</svg>');
-holder.innerHTML=o.join('');
+el.innerHTML = o.join('');
 ```
 
 }
 
-// 相容 Chart.js constructor: new Chart(canvas, config)
-function Chart(canvas, config){
-if(!canvas) return;
-var parent=canvas.parentElement;
-if(!parent) return;
-canvas.style.display=‘none’;
-var div=document.createElement(‘div’);
-div.style.cssText=‘width:100%;min-height:200px’;
-parent.appendChild(div);
-this._div=div; this._cfg=config;
-var self=this;
-function attempt(tries){
-var W=div.getBoundingClientRect().width||div.offsetWidth||0;
-if(W<50 && tries<15){ setTimeout(function(){ attempt(tries+1); }, 80); return; }
-drawSVG(div, config);
+// 圖表實例
+function Chart(elOrId, cfg){
+var el = (typeof elOrId===‘string’) ? document.getElementById(elOrId) : elOrId;
+if(!el) return;
+// 如果是 canvas，用它的父容器
+if(el.tagName===‘CANVAS’){
+el.style.display=‘none’;
+var d=document.createElement(‘div’);
+d.style.cssText=‘width:100%;min-height:200px’;
+el.parentElement.appendChild(d);
+el=d;
 }
-if(document.readyState===‘complete’){ attempt(0); }
-else { window.addEventListener(‘load’,function(){ attempt(0); }); attempt(0); }
-this._onResize=function(){ drawSVG(div, config); };
-window.addEventListener(‘resize’,this._onResize);
+this._el  = el;
+this._cfg = cfg;
+var self  = this;
+ALL.push(this);
+
+```
+// 嘗試渲染，最多重試 20 次（每次 100ms）
+this._tries = 0;
+function tryDraw(){
+  var W = el.getBoundingClientRect().width || el.offsetWidth || 0;
+  if(W < 10 && self._tries < 20){ self._tries++; setTimeout(tryDraw, 100); return; }
+  draw(el, cfg);
 }
-Chart.prototype.destroy=function(){
-if(this._onResize) window.removeEventListener(‘resize’,this._onResize);
-if(this._div) this._div.innerHTML=’’;
+
+// 多重觸發時機，確保至少一次成功
+tryDraw();
+if(document.readyState!=='complete'){
+  window.addEventListener('load', function(){ draw(el,cfg); }, {once:true});
+}
+setTimeout(function(){ draw(el,cfg); }, 200);
+setTimeout(function(){ draw(el,cfg); }, 600);
+```
+
+}
+
+Chart.prototype.destroy = function(){
+var idx = ALL.indexOf(this);
+if(idx>=0) ALL.splice(idx,1);
+if(this._el) this._el.innerHTML = ‘’;
 };
-g.Chart=Chart;
+
+// window resize 重繪所有圖表
+window.addEventListener(‘resize’, function(){
+ALL.forEach(function(inst){ draw(inst._el, inst._cfg); });
+});
+
+g.Chart = Chart;
 })(window);
 </script>
 
@@ -395,11 +425,11 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
 <div class="charts">
   <div class="chart-box">
     <h3>各保單期末餘額走勢（USD）</h3>
-    <canvas id="chartPV" height="220"></canvas>
+    <div id="chartPV" style="width:100%;min-height:200px"></div>
   </div>
   <div class="chart-box">
     <h3>年度領回來源 vs 目標 TWD</h3>
-    <canvas id="chartWD" height="220"></canvas>
+    <div id="chartWD" style="width:100%;min-height:200px"></div>
   </div>
 </div>
 
