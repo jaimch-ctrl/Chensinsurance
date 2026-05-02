@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>多保單整合智能試算｜陳志強</title>
+<title>多保單整合智能試算｜陳8志強</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=DM+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script>
 // SvgChart — 純SVG，直接渲染到容器，GitHub Pages/Claude.ai/iframe 全相容
@@ -21,9 +21,14 @@ function e(s){ return (’’+s).replace(/&/g,’&’).replace(/</g,’<’).rep
 
 function draw(el, cfg){
 if(!el) return;
-// 使用 viewBox 讓 SVG 完全自適應，不依賴容器寬度
-var W = 600; // 邏輯寬度（viewBox），SVG 會自動縮放
-var useViewBox = true;
+var W = el.getBoundingClientRect().width;
+if(!W || W < 10) W = el.offsetWidth || el.clientWidth || 0;
+if(!W || W < 10){
+// 嘗試父容器
+var p = el.parentElement;
+while(p){ W = p.getBoundingClientRect().width || p.offsetWidth; if(W>10) break; p=p.parentElement; }
+}
+if(!W || W < 10) W = 300; // 最終後備
 
 ```
 var H=200, P={t:14,r:12,b:40,l:52};
@@ -51,7 +56,7 @@ function sy(v){ return P.t+gH*(1-(v-yMin)/(yMax-yMin)); }
 function sx(i){ return P.l+(i+0.5)/n*gW; }
 
 var o=[];
-o.push('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+W+' '+H+'" width="100%" height="auto" preserveAspectRatio="xMidYMid meet" style="display:block;overflow:visible">');
+var vbW=W>10?W:600; o.push('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+vbW+' '+H+'" width="100%" style="display:block;overflow:visible;max-width:100%">');
 
 // Grid + Y 標籤
 for(var t=0;t<=5;t++){
@@ -109,26 +114,41 @@ el.innerHTML = o.join('');
 
 }
 
-// 圖表實例 — viewBox 版不需要知道寬度，直接渲染
+// 圖表實例
 function Chart(elOrId, cfg){
 var el = (typeof elOrId===‘string’) ? document.getElementById(elOrId) : elOrId;
 if(!el) return;
+// 如果是 canvas，用它的父容器
 if(el.tagName===‘CANVAS’){
 el.style.display=‘none’;
 var d=document.createElement(‘div’);
-d.style.cssText=‘width:100%;min-height:180px’;
+d.style.cssText=‘width:100%;min-height:200px’;
 el.parentElement.appendChild(d);
 el=d;
 }
-this._el = el;
+this._el  = el;
 this._cfg = cfg;
+var self  = this;
 ALL.push(this);
-// 直接渲染，viewBox 讓 SVG 自適應寬度
-draw(el, cfg);
-// load 後再渲染一次確保
-if(document.readyState!==‘complete’){
-window.addEventListener(‘load’, function(){ draw(el,cfg); }, {once:true});
+
+```
+// 嘗試渲染，最多重試 20 次（每次 100ms）
+this._tries = 0;
+function tryDraw(){
+  var W = el.getBoundingClientRect().width || el.offsetWidth || 0;
+  if(W < 10 && self._tries < 20){ self._tries++; setTimeout(tryDraw, 100); return; }
+  draw(el, cfg);
 }
+
+// 多重觸發時機，確保至少一次成功
+tryDraw();
+if(document.readyState!=='complete'){
+  window.addEventListener('load', function(){ draw(el,cfg); }, {once:true});
+}
+setTimeout(function(){ draw(el,cfg); }, 200);
+setTimeout(function(){ draw(el,cfg); }, 600);
+```
+
 }
 
 Chart.prototype.destroy = function(){
@@ -359,22 +379,22 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
   <div class="advisor-grid">
     <div class="advisor-card">
       <h4>現況判讀</h4>
-      <div class="f edit-only"><textarea id="summaryStatusInput" oninput="document.getElementById('summaryStatus').textContent=this.value;document.getElementById('summaryStatus').style.display=this.value?'block':'none'" placeholder="請輸入現況判讀"></textarea></div>
+      <div class="f edit-only"><textarea id="summaryStatusInput" oninput="var p=document.getElementById('summaryStatus');if(p){p.textContent=this.value;p.style.display=this.value?'block':'none';}" placeholder="請輸入現況判讀"></textarea></div>
       <p id="summaryStatus"></p>
     </div>
     <div class="advisor-card">
       <h4>策略結構說明</h4>
-      <div class="f edit-only"><textarea id="summaryStrategyInput" oninput="document.getElementById('summaryStrategy').textContent=this.value;document.getElementById('summaryStrategy').style.display=this.value?'block':'none'" placeholder="請輸入 A→B→C 或多保單接力策略說明"></textarea></div>
+      <div class="f edit-only"><textarea id="summaryStrategyInput" oninput="var p=document.getElementById('summaryStrategy');if(p){p.textContent=this.value;p.style.display=this.value?'block':'none';}" placeholder="請輸入 A→B→C 或多保單接力策略說明"></textarea></div>
       <p id="summaryStrategy"></p>
     </div>
     <div class="advisor-card">
       <h4>顧問結論</h4>
-      <div class="f edit-only"><textarea id="summaryAdviceInput" oninput="document.getElementById('summaryAdvice').textContent=this.value;document.getElementById('summaryAdvice').style.display=this.value?'block':'none'" placeholder="請輸入顧問結論"></textarea></div>
+      <div class="f edit-only"><textarea id="summaryAdviceInput" oninput="var p=document.getElementById('summaryAdvice');if(p){p.textContent=this.value;p.style.display=this.value?'block':'none';}" placeholder="請輸入顧問結論"></textarea></div>
       <p id="summaryAdvice"></p>
     </div>
     <div class="advisor-card">
       <h4>風險提醒</h4>
-      <div class="f edit-only"><textarea id="summaryRiskInput" oninput="document.getElementById('summaryRisk').textContent=this.value;document.getElementById('summaryRisk').style.display=this.value?'block':'none'" placeholder="請輸入風險提醒"></textarea></div>
+      <div class="f edit-only"><textarea id="summaryRiskInput" oninput="var p=document.getElementById('summaryRisk');if(p){p.textContent=this.value;p.style.display=this.value?'block':'none';}" placeholder="請輸入風險提醒"></textarea></div>
       <p id="summaryRisk"></p>
     </div>
   </div>
@@ -827,6 +847,11 @@ renderSummary(rows,targetTWD);
 renderTable(rows,policies,FX);
 // 稍微延遲讓 DOM layout 穩定後再畫圖
 setTimeout(function(){ renderCharts(rows,policies,targetTWD,FX); }, 50);
+[‘Status’,‘Strategy’,‘Advice’,‘Risk’].forEach(function(k){
+var inp=document.getElementById(‘summary’+k+‘Input’);
+var p=document.getElementById(‘summary’+k);
+if(inp&&p&&inp.value){ p.textContent=inp.value; p.style.display=‘block’; }
+});
 }
 function renderSummary(rows,targetTWD){
 if(!document.getElementById(‘summaryStatusInput’).value.trim()){
@@ -1140,22 +1165,14 @@ document.getElementById(‘regularStartYear’).value = state.regularStartYear;
 if(state.years)      document.getElementById(‘years’).value      = state.years;
 if(state.fx)         document.getElementById(‘fx’).value         = state.fx;
 if(state.rocStart)   document.getElementById(‘rocStart’).value   = state.rocStart;
-if(state.summaryStatus){
-document.getElementById(‘summaryStatusInput’).value = state.summaryStatus;
-var el=document.getElementById(‘summaryStatus’); if(el){el.textContent=state.summaryStatus;el.style.display=‘block’;}
-}
-if(state.summaryStrategy){
-document.getElementById(‘summaryStrategyInput’).value = state.summaryStrategy;
-var el=document.getElementById(‘summaryStrategy’); if(el){el.textContent=state.summaryStrategy;el.style.display=‘block’;}
-}
-if(state.summaryAdvice){
-document.getElementById(‘summaryAdviceInput’).value = state.summaryAdvice;
-var el=document.getElementById(‘summaryAdvice’); if(el){el.textContent=state.summaryAdvice;el.style.display=‘block’;}
-}
-if(state.summaryRisk){
-document.getElementById(‘summaryRiskInput’).value = state.summaryRisk;
-var el=document.getElementById(‘summaryRisk’); if(el){el.textContent=state.summaryRisk;el.style.display=‘block’;}
-}
+[‘Status’,‘Strategy’,‘Advice’,‘Risk’].forEach(function(k){
+var val = state[‘summary’+k];
+if(!val) return;
+var inp = document.getElementById(‘summary’+k+‘Input’);
+var p   = document.getElementById(‘summary’+k);
+if(inp) inp.value = val;
+if(p){ p.textContent = val; p.style.display = ‘block’; }
+});
 
 document.getElementById(‘policyList’).innerHTML = ‘’;
 policySeq = 0;
