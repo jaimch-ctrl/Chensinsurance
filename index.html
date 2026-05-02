@@ -8,210 +8,131 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=DM+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script>
 // ══════════════════════════════════════════════════════════
-// MiniChart v2 — 純 Canvas，零依賴，GitHub Pages 相容
+// SvgChart v3 — 純SVG，零依賴，GitHub Pages / Claude.ai 均可用
 // ══════════════════════════════════════════════════════════
-(function(global){
-  var instances = [];
+(function(g){
+  function niceMax(v){
+    if(v<=0) return 10;
+    var m=Math.pow(10,Math.floor(Math.log10(v)));
+    var s=[1,2,2.5,5,10];
+    for(var i=0;i<s.length;i++){ if(s[i]*m>=v) return s[i]*m; }
+    return v*1.2;
+  }
+  function esc(s){ return (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-function MiniChart(canvas, config){
-this.canvas = canvas;
-this.config = config;
-this._retries = 0;
-var self = this;
-// 用 rAF 確保 layout 完成再畫
-requestAnimationFrame(function(){ self._safeDraw(); });
-// window resize 重繪
-this._onResize = function(){ requestAnimationFrame(function(){ self._safeDraw(); }); };
-window.addEventListener(‘resize’, this._onResize);
-instances.push(this);
-}
-
-MiniChart.prototype.destroy = function(){
-window.removeEventListener(‘resize’, this._onResize);
-var idx = instances.indexOf(this);
-if(idx >= 0) instances.splice(idx, 1);
-var ctx = this.canvas.getContext(‘2d’);
-ctx.clearRect(0,0,this.canvas.width,this.canvas.height);
-};
-
-MiniChart.prototype._safeDraw = function(){
-var self = this;
-var parent = this.canvas.parentElement;
-if(!parent){ return; }
-// 多種方式取得寬度
-var W = parent.getBoundingClientRect().width
-|| parent.offsetWidth
-|| parent.clientWidth;
-if(W < 50 && this._retries < 10){
-this._retries++;
-setTimeout(function(){ requestAnimationFrame(function(){ self._safeDraw(); }); }, 100 * this._retries);
-return;
-}
-if(W < 50) W = 300; // 最終回退值
-this._draw(W);
-};
-
-MiniChart.prototype._draw = function(W){
-var cfg = this.config;
-var canvas = this.canvas;
-var dpr = Math.min(window.devicePixelRatio || 1, 2);
+function drawSVG(holder, config){
+var W = Math.max(holder.getBoundingClientRect().width||0, holder.offsetWidth||0, 260);
 var H = 200;
+var P = {t:14,r:12,b:40,l:52};
+var gW=W-P.l-P.r, gH=H-P.t-P.b;
+var type=config.type||‘line’;
+var labels=config.data.labels||[];
+var dsets=config.data.datasets||[];
+var n=labels.length; if(!n){ holder.innerHTML=’’; return; }
 
 ```
-canvas.style.width  = W + 'px';
-canvas.style.height = H + 'px';
-canvas.width  = Math.round(W * dpr);
-canvas.height = Math.round(H * dpr);
-
-var ctx = canvas.getContext('2d');
-ctx.scale(dpr, dpr);
-ctx.clearRect(0, 0, W, H);
-
-var PAD = {top:14, right:12, bottom:34, left:56};
-var gW = W - PAD.left - PAD.right;
-var gH = H - PAD.top  - PAD.bottom;
-var labels   = cfg.data.labels   || [];
-var datasets = cfg.data.datasets || [];
-var type     = cfg.type || 'line';
-var n        = labels.length;
-
-// ── Y range ──
-var yMin = Infinity, yMax = -Infinity;
-if(type === 'bar'){
+// Y range
+var yMin=0,yMax=0;
+if(type==='bar'){
   for(var i=0;i<n;i++){
-    var sum=0;
-    datasets.forEach(function(ds){ if(ds.type!=='line') sum+=(ds.data[i]||0); });
-    yMax = Math.max(yMax, sum);
-    datasets.forEach(function(ds){ if(ds.type==='line'){ yMax=Math.max(yMax,ds.data[i]||0); yMin=Math.min(yMin,ds.data[i]||0); } });
+    var s=0;
+    dsets.forEach(function(d){ if(d.type!=='line') s+=(+d.data[i]||0); });
+    if(s>yMax) yMax=s;
+    dsets.forEach(function(d){ if(d.type==='line'){ var v=+d.data[i]||0; yMax=Math.max(yMax,v); yMin=Math.min(yMin,v); }});
   }
-  yMin = Math.min(yMin, 0);
 } else {
-  datasets.forEach(function(ds){
-    (ds.data||[]).forEach(function(v){ if(v!=null){ yMin=Math.min(yMin,v); yMax=Math.max(yMax,v); } });
-  });
+  dsets.forEach(function(d){ (d.data||[]).forEach(function(v){ v=+v||0; yMax=Math.max(yMax,v); yMin=Math.min(yMin,v); }); });
 }
-if(!isFinite(yMin)||!isFinite(yMax)){ yMin=0; yMax=1; }
-if(yMax === yMin) yMax = yMin + 1;
+yMax=niceMax(yMax); if(yMin<0) yMin=-niceMax(-yMin);
 
-// Nice ticks
-var rawRange = yMax - yMin;
-var mag = Math.pow(10, Math.floor(Math.log10(rawRange)));
-var step = Math.ceil(rawRange / mag / 5) * mag;
-yMax = Math.ceil(yMax / step) * step;
-yMin = Math.floor(yMin / step) * step;
-if(yMax === yMin){ yMax = yMin + step; }
+function sy(v){ return P.t+gH*(1-(v-yMin)/(yMax-yMin)); }
+function sx(i){ return P.l+(i+0.5)/n*gW; }
 
-function sy(v){ return PAD.top + gH - (v - yMin) / (yMax - yMin) * gH; }
-function sx(i){ return PAD.left + (i + 0.5) / n * gW; }
+var o=[]; // svg parts
+o.push('<svg xmlns="http://www.w3.org/2000/svg" width="'+W+'" height="'+H+'" style="display:block;overflow:visible">');
 
-// ── Grid + Y labels ──
-ctx.strokeStyle = 'rgba(0,0,0,0.07)';
-ctx.lineWidth = 1;
-ctx.fillStyle = '#888';
-ctx.font = '9px sans-serif';
-ctx.textAlign = 'right';
-var nTicks = 5;
-for(var t=0; t<=nTicks; t++){
-  var v  = yMin + t * (yMax - yMin) / nTicks;
-  var y0 = sy(v);
-  ctx.beginPath(); ctx.moveTo(PAD.left, y0); ctx.lineTo(PAD.left + gW, y0); ctx.stroke();
-  var lbl = Math.abs(v) >= 1000 ? (v/1000).toFixed(0)+'k' : Math.round(v)+'';
-  ctx.fillText(lbl, PAD.left - 3, y0 + 3);
+// grid + y labels
+for(var t=0;t<=5;t++){
+  var v=yMin+t*(yMax-yMin)/5, y0=sy(v);
+  o.push('<line x1="'+P.l+'" y1="'+y0+'" x2="'+(P.l+gW)+'" y2="'+y0+'" stroke="#ddd" stroke-width="1"/>');
+  var lbl=Math.abs(v)>=10000?Math.round(v/1000)+'k':Math.abs(v)>=1000?(v/1000).toFixed(1)+'k':Math.round(v)+'';
+  o.push('<text x="'+(P.l-4)+'" y="'+(y0+3)+'" text-anchor="end" font-size="9" fill="#888">'+esc(lbl)+'</text>');
 }
 
-// ── X labels ──
-ctx.textAlign = 'center';
-ctx.fillStyle = '#666';
-var maxL  = Math.max(1, Math.floor(gW / 28));
-var stepL = Math.max(1, Math.ceil(n / maxL));
-labels.forEach(function(lb, i){
-  if(i % stepL !== 0) return;
-  ctx.fillText(lb, sx(i), H - PAD.bottom + 12);
+// x labels
+var stepL=Math.max(1,Math.ceil(n/Math.floor(gW/26)));
+labels.forEach(function(lb,i){
+  if(i%stepL!==0) return;
+  o.push('<text x="'+sx(i)+'" y="'+(H-P.b+13)+'" text-anchor="middle" font-size="9" fill="#666">'+esc(lb)+'</text>');
 });
 
-// ── Bars ──
-if(type === 'bar'){
-  var barW   = Math.max(2, gW / n * 0.65);
-  var bases  = [];
-  for(var j=0;j<n;j++) bases.push(sy(0));
-
-  datasets.filter(function(ds){ return ds.type !== 'line'; }).forEach(function(ds){
-    ds.data.forEach(function(v, i){
-      if(!v) return;
-      var x   = sx(i) - barW / 2;
-      var bH  = bases[i] - sy(v);
-      if(bH > 0){
-        ctx.fillStyle = ds.backgroundColor || '#888';
-        ctx.fillRect(x, bases[i] - bH, barW, bH);
-        bases[i] -= bH;
-      }
+// bars
+if(type==='bar'){
+  var barW=Math.max(2,gW/n*0.62);
+  var bases=labels.map(function(){ return sy(0); });
+  dsets.filter(function(d){ return d.type!=='line'; }).forEach(function(d){
+    d.data.forEach(function(v,i){
+      v=+v||0; if(!v) return;
+      var bH=bases[i]-sy(v);
+      if(bH>0){ o.push('<rect x="'+(sx(i)-barW/2)+'" y="'+(bases[i]-bH)+'" width="'+barW+'" height="'+bH+'" fill="'+(d.backgroundColor||'#888')+'"/>'); bases[i]-=bH; }
     });
   });
 }
 
-// ── Lines ──
-var lineDsets = type === 'line' ? datasets : datasets.filter(function(ds){ return ds.type === 'line'; });
-lineDsets.forEach(function(ds){
-  var data = ds.data || [];
-  if(!data.length) return;
-  ctx.strokeStyle = ds.borderColor || '#333';
-  ctx.lineWidth   = ds.borderWidth || 2;
-  ctx.setLineDash(ds.borderDash || []);
-  ctx.beginPath();
-  var started = false;
-  data.forEach(function(v, i){
-    if(v == null) return;
-    var x = sx(i), y = sy(v);
-    if(!started){ ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // dots
-  if(ds.pointRadius && ds.pointRadius > 0){
-    ctx.fillStyle = ds.borderColor || '#333';
-    data.forEach(function(v, i){
-      if(v == null) return;
-      ctx.beginPath();
-      ctx.arc(sx(i), sy(v), ds.pointRadius, 0, Math.PI*2);
-      ctx.fill();
-    });
-  }
+// lines
+var lds=type==='line'?dsets:dsets.filter(function(d){ return d.type==='line'; });
+lds.forEach(function(d){
+  var pts=[];
+  (d.data||[]).forEach(function(v,i){ if(v!=null) pts.push(sx(i)+','+sy(+v)); });
+  if(!pts.length) return;
+  var da=d.borderDash?'stroke-dasharray="'+d.borderDash.join(' ')+'"':'';
+  o.push('<polyline points="'+pts.join(' ')+'" fill="none" stroke="'+(d.borderColor||'#333')+'" stroke-width="'+(d.borderWidth||2)+'" '+da+'/>');
+  if(d.pointRadius){ pts=[]; (d.data||[]).forEach(function(v,i){ if(v!=null) o.push('<circle cx="'+sx(i)+'" cy="'+sy(+v)+'" r="'+d.pointRadius+'" fill="'+(d.borderColor||'#333')+'"/>'); }); }
 });
 
-// ── Legend ──
-var lx = PAD.left, ly = H - 6;
-ctx.font      = '9px sans-serif';
-ctx.textAlign = 'left';
-datasets.filter(function(d){ return d.label; }).forEach(function(ds){
-  var col = ds.borderColor || ds.backgroundColor || '#888';
-  var lbl = ds.label || '';
-  var tw  = lbl.length * 5.5 + 16;
-  if(lx + tw > W - PAD.right){ lx = PAD.left; ly -= 12; }
-  ctx.fillStyle = col;
-  ctx.fillRect(lx, ly - 7, 9, 7);
-  ctx.fillStyle = '#444';
-  ctx.fillText(lbl, lx + 12, ly);
-  lx += tw;
+// legend (bottom)
+var lx=P.l, ly=H-4;
+dsets.filter(function(d){ return d.label; }).forEach(function(d){
+  var col=d.borderColor||d.backgroundColor||'#888';
+  var tw=d.label.length*5.2+18;
+  if(lx+tw>W-P.r){ lx=P.l; ly-=13; }
+  o.push('<rect x="'+lx+'" y="'+(ly-7)+'" width="9" height="7" fill="'+col+'"/>');
+  o.push('<text x="'+(lx+12)+'" y="'+ly+'" font-size="9" fill="#444">'+esc(d.label)+'</text>');
+  lx+=tw;
 });
+
+o.push('</svg>');
+holder.innerHTML=o.join('');
 ```
 
-};
-
-// Redraw all on scroll (for lazy render)
-window.addEventListener(‘scroll’, function(){
-instances.forEach(function(inst){
-if(inst._retries > 0 || inst.canvas.width < 10){
-requestAnimationFrame(function(){ inst._safeDraw(); });
 }
-});
-}, {passive:true});
 
-function Chart(canvas, config){ return new MiniChart(canvas, config); }
-Chart.prototype = MiniChart.prototype;
-global.MiniChart = MiniChart;
-global.Chart = Chart;
-
+// 相容 Chart.js constructor: new Chart(canvas, config)
+function Chart(canvas, config){
+if(!canvas) return;
+var parent=canvas.parentElement;
+if(!parent) return;
+canvas.style.display=‘none’;
+var div=document.createElement(‘div’);
+div.style.cssText=‘width:100%;min-height:200px’;
+parent.appendChild(div);
+this._div=div; this._cfg=config;
+var self=this;
+function attempt(tries){
+var W=div.getBoundingClientRect().width||div.offsetWidth||0;
+if(W<50 && tries<15){ setTimeout(function(){ attempt(tries+1); }, 80); return; }
+drawSVG(div, config);
+}
+if(document.readyState===‘complete’){ attempt(0); }
+else { window.addEventListener(‘load’,function(){ attempt(0); }); attempt(0); }
+this._onResize=function(){ drawSVG(div, config); };
+window.addEventListener(‘resize’,this._onResize);
+}
+Chart.prototype.destroy=function(){
+if(this._onResize) window.removeEventListener(‘resize’,this._onResize);
+if(this._div) this._div.innerHTML=’’;
+};
+g.Chart=Chart;
 })(window);
 </script>
 
@@ -880,7 +801,8 @@ rows.push({
   totalGrowth,
   totalWithdraw,
   totalTWD:Math.round(totalWithdraw*FX),
-  shortfall:need,
+  shortfall: isRegularYear ? need : 0,
+  isRegularYear,
   lumpItems,
   lumpTotalUSD,
   lumpTotalTWD:Math.round(lumpTotalUSD*FX),
@@ -943,7 +865,12 @@ const grandCls = r.grandTotalTWD>=(targetTWD2*0.96)?‘twd-ok’:(r.grandTotalTW
 const lumpStr = (r.lumpItems&&r.lumpItems.length>0)
 ? r.lumpItems.filter(lp=>lp.actual>0).map(lp=>`💰${lp.name}<br>${Math.round(lp.actual).toLocaleString()}`).join(’ ’)
 : ‘—’;
-const note = r.shortfall>0.5 ? `缺口 ${Math.round(r.shortfall*FX).toLocaleString()}` : (idx>0 && r.totalAsset<rows[idx-1].totalAsset ? ‘資產遞減’ : ‘✓’);
+// 只有定期提領年才顯示缺口
+const isRegYr = (r.year >= (+document.getElementById(‘regularStartYear’)?.value||1));
+const note = r.shortfall>0.5
+? `缺口 ${Math.round(r.shortfall*FX).toLocaleString()}`
+: (!r.isRegularYear ? ‘單筆年’
+: (idx>0 && r.totalAsset<rows[idx-1].totalAsset ? ‘資產遞減’ : ‘✓’));
 html+=` <td class="sv-t total-start">${Math.round(r.totalAsset).toLocaleString()}</td> <td class="wd">${Math.round(r.totalWithdraw).toLocaleString()}</td> <td class="lump-cell" style="font-size:10.5px;line-height:1.4">${lumpStr}</td> <td class="${grandCls}" style="font-weight:900">${r.grandTotalTWD.toLocaleString()}</td> <td class="status-note">${note}</td>`;
 tr.innerHTML=html;
 tb.appendChild(tr);
@@ -1131,32 +1058,39 @@ savedAt: new Date().toLocaleString(‘zh-TW’)
 
 // ── 匯出設定檔 (.json) ──
 function saveAsJson(){
-try{
 const state = collectState();
-const json = JSON.stringify(state, null, 2);
-const blob = new Blob([json], {type:‘application/json;charset=utf-8’});
-const url = URL.createObjectURL(blob);
-const a = document.createElement(‘a’);
-a.href = url;
-const name = (document.getElementById(‘clientName’)?.value||‘保單設定’).replace(/\s/g,’_’);
-a.download = `${name}_設定_${new Date().toISOString().slice(0,10)}.json`;
-// Try download — may be blocked in Claude.ai sandbox
-try {
-document.body.appendChild(a);
-a.click();
-setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
-} catch(e) {
-URL.revokeObjectURL(url);
-// Fallback: show data in new window
-const w = window.open(’’,’_blank’);
-if(w){ w.document.write(’<pre>’+JSON.stringify(JSON.parse(json),null,2)+’</pre>’); w.document.close(); }
-}
+const json  = JSON.stringify(state, null, 2);
+// 顯示 JSON 在新視窗，讓使用者用「全選→複製→貼到記事本→另存」
+// 同時也嘗試 data URI 下載
+const dataUri = ‘data:application/json;charset=utf-8,’ + encodeURIComponent(json);
 const el = document.getElementById(‘saveStatus’);
-el.textContent = ‘✅ 設定檔已下載，請保存到手機/電腦’;
-el.style.color = ‘var(–green)’;
-setTimeout(()=>el.textContent=’’, 5000);
-}catch(e){
-alert(‘匯出失敗：’+e.message);
+
+// 方法1: 嘗試 window.open 開新分頁
+const win = window.open(’’,’_blank’);
+if(win){
+const pre = win.document.createElement(‘pre’);
+pre.style.cssText = ‘white-space:pre-wrap;word-break:break-all;font-size:12px;padding:20px;font-family:monospace’;
+pre.textContent = json;
+const h  = win.document.createElement(‘h3’);
+h.textContent  = ‘請全選（Cmd+A）→ 複製（Cmd+C）→ 貼到記事本/文字編輯器 → 另存為 .json 檔’;
+h.style.cssText = ‘padding:16px;background:#e8f4ef;border-bottom:1px solid #ccc;font-family:sans-serif’;
+const dl = win.document.createElement(‘a’);
+dl.href      = dataUri;
+dl.download  = ‘policy_setting.json’;
+dl.textContent = ‘⬇ 點此直接下載 .json（若瀏覽器支援）’;
+dl.style.cssText = ‘display:block;padding:10px 16px;background:#0a5c4a;color:#fff;text-decoration:none;font-family:sans-serif’;
+win.document.body.style.margin = ‘0’;
+win.document.body.appendChild(dl);
+win.document.body.appendChild(h);
+win.document.body.appendChild(pre);
+if(el){ el.textContent=‘✅ 設定已開啟新視窗，請複製內容儲存’; el.style.color=‘var(–green)’; setTimeout(()=>el.textContent=’’,6000); }
+} else {
+// 方法2: 在當前頁顯示可複製的文字
+const modal = document.createElement(‘div’);
+modal.style.cssText=‘position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center’;
+modal.innerHTML=`<div style="background:#fff;border-radius:12px;padding:20px;max-width:90vw;max-height:80vh;overflow:auto;position:relative"> <button onclick="this.parentElement.parentElement.remove()" style="position:absolute;top:10px;right:14px;border:none;background:none;font-size:20px;cursor:pointer">✕</button> <p style="font-weight:700;margin-bottom:12px;font-size:13px">請全選複製以下內容，貼到記事本後另存為 .json：</p> <textarea rows="12" style="width:100%;font-size:11px;font-family:monospace" onclick="this.select()" readonly>${json.replace(/</g,'&lt;')}</textarea> <br><a href="${dataUri}" download="policy_setting.json" style="display:inline-block;margin-top:10px;padding:8px 16px;background:#0a5c4a;color:#fff;border-radius:6px;text-decoration:none;font-size:13px">⬇ 下載 .json</a> </div>`;
+document.body.appendChild(modal);
+if(el){ el.textContent=‘請複製上方內容’; el.style.color=‘var(–gold)’; setTimeout(()=>el.textContent=’’,6000); }
 }
 }
 
@@ -1217,55 +1151,40 @@ recalc();
 }
 
 function printPage(){
-// In Claude.ai artifact iframe, window.print() may be blocked.
-// Try multiple approaches.
-try {
-// First: try direct print
-if(window.self === window.top){
-window.print();
-} else {
-// We’re in an iframe — open a new window with current HTML and print
 const html = document.documentElement.outerHTML;
-const win = window.open(’’,’_blank’);
+const uri  = ‘data:text/html;charset=utf-8,’+encodeURIComponent(html);
+const win  = window.open(uri,’_blank’);
 if(win){
-win.document.write(html);
-win.document.close();
 win.focus();
-setTimeout(()=>{ win.print(); }, 800);
+setTimeout(function(){ try{ win.print(); }catch(e){} }, 1000);
+const el=document.getElementById(‘saveStatus’);
+if(el){ el.textContent=‘✅ 已開啟列印視窗’; el.style.color=‘var(–gold)’; setTimeout(()=>el.textContent=’’,5000); }
 } else {
-// Fallback: export HTML instead
-alert(‘列印功能在此環境受限。\n\n請改用「匯出 HTML 檔案」，下載後在瀏覽器開啟，再按 Cmd+P（Mac）或 Ctrl+P（Windows）列印/存成 PDF。’);
-}
-}
-} catch(e) {
-alert(‘列印功能在此環境受限。\n\n請改用「匯出 HTML 檔案」，下載後在瀏覽器開啟，再按 Cmd+P 或 Ctrl+P 列印/存成 PDF。’);
+alert(‘請允許瀏覽器開啟彈出視窗，或改用「匯出HTML」下載後再按 Cmd+P 列印。’);
 }
 }
 
 function exportHTML(){
-// Auto-save first, then export current page as standalone HTML
-const state = collectState();
-const stateJson = JSON.stringify(state).replace(/</g,’\u003c’);
-const blob = new Blob([
-document.documentElement.outerHTML.replace(
-‘</body>’,
-`<script> // Auto-restore on load window.addEventListener('DOMContentLoaded',function(){ try{ const s=${stateJson}; // inject into localStorage localStorage.setItem('policyApp_state', JSON.stringify(s)); restoreState(s); }catch(e){console.error(e);} }); <\/script></body>`
-)
-], {type:‘text/html;charset=utf-8’});
-const url = URL.createObjectURL(blob);
-const a = document.createElement(‘a’);
-a.href = url;
-const rawName = (document.getElementById(‘clientName’)?.value||‘保單試算’);
-const name = rawName.replace(/[\s\u4e00-\u9fff]/g, c => encodeURIComponent(c).replace(/%/g,’’));
-a.download = `policy_${rawName}_${new Date().toISOString().slice(0,10)}.html`;
-try {
-document.body.appendChild(a);
-a.click();
-setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
-} catch(e) {
-// Open in new tab as fallback
-window.open(url,’_blank’);
-setTimeout(()=>URL.revokeObjectURL(url), 5000);
+const state    = collectState();
+const stateJson= JSON.stringify(state).replace(/</g,’\u003c’).replace(/>/g,’\u003e’);
+const html     = document.documentElement.outerHTML;
+const injected = html.replace(’</body>’,
+‘<scr’+‘ipt>window.addEventListener(“load”,function(){try{restoreState(’+stateJson+’);}catch(e){console.error(e);}});</scr’+‘ipt></body>’
+);
+const uri  = ‘data:text/html;charset=utf-8,’+encodeURIComponent(injected);
+const name = (document.getElementById(‘clientName’)?.value||‘保單試算’);
+const fname= name+’_’+new Date().toISOString().slice(0,10)+’.html’;
+// 開新視窗（可另存）
+const win = window.open(uri,’_blank’);
+if(win){
+win.focus();
+const el=document.getElementById(‘saveStatus’);
+if(el){ el.textContent=‘✅ HTML已開啟新視窗，請用 Cmd+S 或右鍵→另存網頁’; el.style.color=‘var(–purple)’; setTimeout(()=>el.textContent=’’,8000); }
+} else {
+// 降級：同頁 a.click()
+const a=document.createElement(‘a’); a.href=uri; a.download=fname; a.style.display=‘none’;
+document.body.appendChild(a); a.click();
+setTimeout(()=>document.body.removeChild(a),500);
 }
 }
 
