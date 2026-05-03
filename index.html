@@ -7,155 +7,123 @@
 <title>多保單整合智能試算｜陳志強</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=DM+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script>
-// SvgChart — 純SVG，直接渲染到容器，GitHub Pages/Claude.ai/iframe 全相容
+// ── ChartSVG: 純 SVG 圖表，GitHub Pages 100% 相容 ──────────────
+// 核心：完全不依賴 JS 計算容器像素寬度
+// 用 viewBox + CSS width:100% 讓瀏覽器自動縮放
 (function(g){
-  var ALL = []; // 所有圖表實例，resize 時重繪
+  var LW=600, LH=200; // 邏輯座標系（固定，不隨容器變）
+  var PAD={t:14,r:12,b:38,l:52};
+  var GW=LW-PAD.l-PAD.r, GH=LH-PAD.t-PAD.b;
 
 function nice(v){
 if(v<=0) return 10;
 var m=Math.pow(10,Math.floor(Math.log10(v)));
-for(var *,s=[1,2,2.5,5,10],i=0;i<s.length;i++) if((*=s[i]*m)>=v) return _;
+for(var s=[1,2,2.5,5,10],i=0;i<s.length;i++) if(s[i]*m>=v) return s[i]*m;
 return v*1.2;
 }
-function e(s){ return (’’+s).replace(/&/g,’&’).replace(/</g,’<’).replace(/>/g,’>’); }
+function esc(s){ return(’’+s).replace(/&/g,’&’).replace(/</g,’<’).replace(/>/g,’>’); }
 
-function draw(el, cfg){
-if(!el) return;
-// 向上追溯取得有效寬度
-var W = 0, _n = el;
-while(_n && W < 50){ W = _n.getBoundingClientRect().width || _n.offsetWidth || 0; _n = _n.parentElement; }
-if(W < 50) W = 320; // 後備值，確保一定畫出圖
-
-```
-var H=200, P={t:14,r:12,b:40,l:52};
-var gW=W-P.l-P.r, gH=H-P.t-P.b;
-var type=cfg.type||'line';
+function buildSVG(cfg){
+var type=cfg.type||‘line’;
 var labels=cfg.data.labels||[];
 var dsets=cfg.data.datasets||[];
-var n=labels.length; if(!n){ el.innerHTML=''; return; }
+var n=labels.length; if(!n) return ‘<svg viewBox="0 0 600 200" width="100%"></svg>’;
 
+```
 // Y 範圍
-var yMin=0, yMax=0;
+var yMin=0,yMax=0;
 if(type==='bar'){
   for(var i=0;i<n;i++){
     var s=0; dsets.forEach(function(d){ if(d.type!=='line') s+=(+d.data[i]||0); });
-    if(s>yMax) yMax=s;
-    dsets.forEach(function(d){ if(d.type==='line'){ var v=+d.data[i]||0; yMax=Math.max(yMax,v); yMin=Math.min(yMin,v); }});
+    yMax=Math.max(yMax,s);
+    dsets.forEach(function(d){ if(d.type==='line'){yMax=Math.max(yMax,+d.data[i]||0);yMin=Math.min(yMin,+d.data[i]||0);}});
   }
 } else {
-  dsets.forEach(function(d){ (d.data||[]).forEach(function(v){ v=+v||0; yMax=Math.max(yMax,v); yMin=Math.min(yMin,v); }); });
+  dsets.forEach(function(d){(d.data||[]).forEach(function(v){v=+v||0;yMax=Math.max(yMax,v);yMin=Math.min(yMin,v);});});
 }
-yMax=nice(yMax); if(yMin<0) yMin=-nice(-yMin);
-if(yMax===yMin) yMax=yMin+1;
+yMax=nice(yMax); if(yMin<0) yMin=-nice(-yMin); if(yMax===yMin) yMax=yMin+1;
 
-function sy(v){ return P.t+gH*(1-(v-yMin)/(yMax-yMin)); }
-function sx(i){ return P.l+(i+0.5)/n*gW; }
+function sy(v){ return PAD.t+GH*(1-(v-yMin)/(yMax-yMin)); }
+function sx(i){ return PAD.l+(i+0.5)/n*GW; }
 
 var o=[];
-var vbW=W>50?W:600; o.push('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+vbW+' '+H+'" width="100%" style="display:block;overflow:visible;max-width:100%">');
+// SVG 用 viewBox，width=100% → 瀏覽器自動縮放，不需要 JS 計算寬度
+o.push('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+LW+' '+LH+'" width="100%" height="auto" style="display:block;max-width:100%" preserveAspectRatio="xMidYMid meet">');
 
-// Grid + Y 標籤
+// Grid + Y labels
 for(var t=0;t<=5;t++){
   var v=yMin+t*(yMax-yMin)/5, y0=sy(v);
-  o.push('<line x1="'+P.l+'" y1="'+y0+'" x2="'+(P.l+gW)+'" y2="'+y0+'" stroke="#ddd" stroke-width="1"/>');
+  o.push('<line x1="'+PAD.l+'" y1="'+y0+'" x2="'+(PAD.l+GW)+'" y2="'+y0+'" stroke="#ddd" stroke-width="1"/>');
   var lbl=Math.abs(v)>=10000?Math.round(v/1000)+'k':Math.abs(v)>=1000?(v/1000).toFixed(1)+'k':Math.round(v)+'';
-  o.push('<text x="'+(P.l-4)+'" y="'+(y0+3)+'" text-anchor="end" font-size="9" fill="#888">'+e(lbl)+'</text>');
+  o.push('<text x="'+(PAD.l-4)+'" y="'+(y0+3)+'" text-anchor="end" font-size="9" fill="#888">'+esc(lbl)+'</text>');
 }
-
-// X 標籤
-var stepL=Math.max(1,Math.ceil(n/Math.floor(gW/26)));
+// X labels
+var stepL=Math.max(1,Math.ceil(n/Math.floor(GW/22)));
 labels.forEach(function(lb,i){
-  if(i%stepL!==0) return;
-  o.push('<text x="'+sx(i)+'" y="'+(H-P.b+13)+'" text-anchor="middle" font-size="9" fill="#666">'+e(lb)+'</text>');
+  if(i%stepL===0) o.push('<text x="'+sx(i)+'" y="'+(LH-PAD.b+12)+'" text-anchor="middle" font-size="9" fill="#666">'+esc(lb)+'</text>');
 });
-
-// 長條圖
+// Bars
 if(type==='bar'){
-  var bW=Math.max(2,gW/n*0.62);
-  var bases=labels.map(function(){ return sy(0); });
-  dsets.filter(function(d){ return d.type!=='line'; }).forEach(function(d){
+  var bW=Math.max(2,GW/n*0.6);
+  var bases=labels.map(function(){return sy(0);});
+  dsets.filter(function(d){return d.type!=='line';}).forEach(function(d){
     d.data.forEach(function(v,i){
       v=+v||0; if(!v) return;
       var bH=bases[i]-sy(v);
-      if(bH>0){ o.push('<rect x="'+(sx(i)-bW/2)+'" y="'+(bases[i]-bH)+'" width="'+bW+'" height="'+bH+'" fill="'+(d.backgroundColor||'#888')+'"/>'); bases[i]-=bH; }
+      if(bH>0){o.push('<rect x="'+(sx(i)-bW/2)+'" y="'+(bases[i]-bH)+'" width="'+bW+'" height="'+bH+'" fill="'+(d.backgroundColor||'#888')+'"/>');bases[i]-=bH;}
     });
   });
 }
-
-// 折線圖
-var lds=type==='line'?dsets:dsets.filter(function(d){ return d.type==='line'; });
+// Lines
+var lds=type==='line'?dsets:dsets.filter(function(d){return d.type==='line';});
 lds.forEach(function(d){
   var pts=[];
-  (d.data||[]).forEach(function(v,i){ if(v!=null) pts.push(sx(i)+','+sy(+v)); });
+  (d.data||[]).forEach(function(v,i){if(v!=null) pts.push(sx(i)+','+sy(+v));});
   if(!pts.length) return;
   var da=d.borderDash?'stroke-dasharray="'+d.borderDash.join(' ')+'"':'';
   o.push('<polyline points="'+pts.join(' ')+'" fill="none" stroke="'+(d.borderColor||'#333')+'" stroke-width="'+(d.borderWidth||2)+'" '+da+'/>');
-  if(d.pointRadius){ (d.data||[]).forEach(function(v,i){ if(v!=null) o.push('<circle cx="'+sx(i)+'" cy="'+sy(+v)+'" r="'+d.pointRadius+'" fill="'+(d.borderColor||'#333')+'"/>'); }); }
+  if(d.pointRadius) pts.forEach(function(_,i){if(d.data[i]!=null) o.push('<circle cx="'+sx(i)+'" cy="'+sy(+d.data[i])+'" r="'+d.pointRadius+'" fill="'+(d.borderColor||'#333')+'"/>');});
 });
-
-// 圖例
-var lx=P.l, ly=H-4;
-dsets.filter(function(d){ return d.label; }).forEach(function(d){
-  var col=d.borderColor||d.backgroundColor||'#888';
-  var tw=d.label.length*5.2+18;
-  if(lx+tw>W-P.r){ lx=P.l; ly-=13; }
+// Legend
+var lx=PAD.l,ly=LH-3;
+dsets.filter(function(d){return d.label;}).forEach(function(d){
+  var col=d.borderColor||d.backgroundColor||'#888', tw=d.label.length*5+18;
+  if(lx+tw>LW-PAD.r){lx=PAD.l;ly-=12;}
   o.push('<rect x="'+lx+'" y="'+(ly-7)+'" width="9" height="7" fill="'+col+'"/>');
-  o.push('<text x="'+(lx+12)+'" y="'+ly+'" font-size="9" fill="#444">'+e(d.label)+'</text>');
+  o.push('<text x="'+(lx+12)+'" y="'+ly+'" font-size="9" fill="#444">'+esc(d.label)+'</text>');
   lx+=tw;
 });
-
 o.push('</svg>');
-el.innerHTML = o.join('');
+return o.join('');
 ```
 
 }
 
-// 圖表實例
-function Chart(elOrId, cfg){
-var el = (typeof elOrId===‘string’) ? document.getElementById(elOrId) : elOrId;
-if(!el) return;
-// canvas → 建新 div 插到 chart-box 容器取代 canvas
-if(el.tagName===‘CANVAS’){
-el.style.display=‘none’;
-var d=document.createElement(‘div’);
-d.style.cssText=‘width:100%;min-height:200px;box-sizing:border-box’;
-el.parentElement.insertBefore(d, el.nextSibling);
-el=d;
+// Chart.js 相容介面
+function Chart(elOrCanvas, cfg){
+if(!elOrCanvas) return;
+// 找容器
+var container;
+if(typeof elOrCanvas===‘string’) elOrCanvas=document.getElementById(elOrCanvas);
+if(!elOrCanvas) return;
+if(elOrCanvas.tagName===‘CANVAS’){
+elOrCanvas.style.display=‘none’;
+container=document.createElement(‘div’);
+container.style.cssText=‘width:100%;line-height:0’;
+elOrCanvas.parentNode.insertBefore(container, elOrCanvas.nextSibling);
+} else {
+container=elOrCanvas;
 }
-this._el  = el;
-this._cfg = cfg;
-var self  = this;
-ALL.push(this);
-
-```
-// 用多重時機確保渲染，每次用當前實際寬度
-function tryDraw(n){
-  var w=0, node=el;
-  while(node && w<50){ w=node.getBoundingClientRect().width||node.offsetWidth||0; node=node.parentElement; }
-  if(w<50 && n<20){ setTimeout(function(){ tryDraw(n+1); }, 150); return; }
-  draw(el, cfg); // w>=50 或已等夠久，強制畫
+this._container=container;
+this._cfg=cfg;
+// 直接插入 SVG — 不需要等待寬度，viewBox 會自動縮放
+container.innerHTML=buildSVG(cfg);
 }
-tryDraw(0);
-window.addEventListener('load', function(){ tryDraw(0); }, {once:true});
-setTimeout(function(){ tryDraw(0); }, 500);
-setTimeout(function(){ tryDraw(0); }, 1500);
-setTimeout(function(){ tryDraw(0); }, 3000);
-```
-
-}
-
-Chart.prototype.destroy = function(){
-var idx = ALL.indexOf(this);
-if(idx>=0) ALL.splice(idx,1);
-if(this._el) this._el.innerHTML = ‘’;
+Chart.prototype.destroy=function(){
+if(this._container) this._container.innerHTML=’’;
 };
 
-// window resize 重繪所有圖表
-window.addEventListener(‘resize’, function(){
-ALL.forEach(function(inst){ draw(inst._el, inst._cfg); });
-});
-
-g.Chart = Chart;
+g.Chart=Chart;
 })(window);
 </script>
 
@@ -238,7 +206,7 @@ td.twd-ne{font-weight:900;font-size:13px;background:#fff8e8;color:var(--warn)}
 tr.grand{background:var(--ink)!important}
 tr.grand td{color:#f0c060;font-weight:900;font-size:13px;padding:12px 8px;border-top:2px solid #555}
 .charts{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px;overflow:visible}
-.chart-box{background:var(--paper);border:2px solid var(--border);border-radius:12px;padding:18px;box-shadow:0 2px 8px rgba(0,0,0,.05);min-height:280px;display:flex;flex-direction:column;overflow:hidden}
+.chart-box{background:var(--paper);border:2px solid var(--border);border-radius:12px;padding:18px;box-shadow:0 2px 8px rgba(0,0,0,.05)}
 .chart-box{min-height:280px;display:flex;flex-direction:column}.chart-box h3{font-size:12px;font-weight:900;color:var(--ink2);margin-bottom:12px;flex-shrink:0}.chart-box canvas{flex:1;min-height:220px!important;width:100%!important}
 .footer{border-top:2px solid var(--border);padding-top:12px;font-size:10.5px;color:var(--muted);display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;line-height:1.9;font-weight:500}
 .client-mode .edit-only{display:none!important}
