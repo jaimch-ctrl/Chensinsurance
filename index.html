@@ -21,14 +21,10 @@ function e(s){ return (’’+s).replace(/&/g,’&’).replace(/</g,’<’).rep
 
 function draw(el, cfg){
 if(!el) return;
-var W = el.getBoundingClientRect().width;
-if(!W || W < 10) W = el.offsetWidth || el.clientWidth || 0;
-if(!W || W < 10){
-// 嘗試父容器
-var p = el.parentElement;
-while(p){ W = p.getBoundingClientRect().width || p.offsetWidth; if(W>10) break; p=p.parentElement; }
-}
-if(!W || W < 10) W = 300; // 最終後備
+// 向上追溯取得有效寬度
+var W = 0, _n = el;
+while(_n && W < 10){ W = _n.getBoundingClientRect().width || _n.offsetWidth || 0; _n = _n.parentElement; }
+if(W < 10) W = 300;
 
 ```
 var H=200, P={t:14,r:12,b:40,l:52};
@@ -118,12 +114,12 @@ el.innerHTML = o.join('');
 function Chart(elOrId, cfg){
 var el = (typeof elOrId===‘string’) ? document.getElementById(elOrId) : elOrId;
 if(!el) return;
-// 如果是 canvas，用它的父容器
+// canvas → 建新 div 插到 chart-box 容器取代 canvas
 if(el.tagName===‘CANVAS’){
 el.style.display=‘none’;
 var d=document.createElement(‘div’);
-d.style.cssText=‘width:100%;min-height:200px’;
-el.parentElement.appendChild(d);
+d.style.cssText=‘width:100%;min-height:200px;box-sizing:border-box’;
+el.parentElement.insertBefore(d, el.nextSibling);
 el=d;
 }
 this._el  = el;
@@ -132,21 +128,18 @@ var self  = this;
 ALL.push(this);
 
 ```
-// 嘗試渲染，最多重試 20 次（每次 100ms）
-this._tries = 0;
-function tryDraw(){
-  var W = el.getBoundingClientRect().width || el.offsetWidth || 0;
-  if(W < 10 && self._tries < 20){ self._tries++; setTimeout(tryDraw, 100); return; }
+// 用多重時機確保渲染，每次用當前實際寬度
+function tryDraw(n){
+  // 向上找有寬度的祖先
+  var w=0, node=el;
+  while(node && w<10){ w=node.getBoundingClientRect().width||node.offsetWidth||0; node=node.parentElement; }
+  if(w<10 && n<25){ setTimeout(function(){ tryDraw(n+1); }, 120); return; }
   draw(el, cfg);
 }
-
-// 多重觸發時機，確保至少一次成功
-tryDraw();
-if(document.readyState!=='complete'){
-  window.addEventListener('load', function(){ draw(el,cfg); }, {once:true});
-}
-setTimeout(function(){ draw(el,cfg); }, 200);
-setTimeout(function(){ draw(el,cfg); }, 600);
+tryDraw(0);
+window.addEventListener('load', function(){ tryDraw(0); }, {once:true});
+setTimeout(function(){ tryDraw(0); }, 300);
+setTimeout(function(){ tryDraw(0); }, 800);
 ```
 
 }
@@ -425,11 +418,11 @@ td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);f
 <div class="charts">
   <div class="chart-box">
     <h3>各保單期末餘額走勢（USD）</h3>
-    <div id="chartPV" style="width:100%;min-height:200px"></div>
+    <canvas id="chartPV" height="220"></canvas>
   </div>
   <div class="chart-box">
     <h3>年度領回來源 vs 目標 TWD</h3>
-    <div id="chartWD" style="width:100%;min-height:200px"></div>
+    <canvas id="chartWD" height="220"></canvas>
   </div>
 </div>
 
