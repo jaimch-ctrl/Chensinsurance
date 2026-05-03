@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>多保單整合智能試算｜陳8888志強</title>
+<title>多保單整合智能試算｜陳志強</title>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700;900&family=Noto+Sans+TC:wght@400;500;700;900&family=DM+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <script>
 // SvgChart — 純SVG，直接渲染到容器，GitHub Pages/Claude.ai/iframe 全相容
@@ -23,8 +23,8 @@ function draw(el, cfg){
 if(!el) return;
 // 向上追溯取得有效寬度
 var W = 0, _n = el;
-while(_n && W < 10){ W = _n.getBoundingClientRect().width || _n.offsetWidth || 0; _n = _n.parentElement; }
-if(W < 10) W = 300;
+while(_n && W < 50){ W = _n.getBoundingClientRect().width || _n.offsetWidth || 0; _n = _n.parentElement; }
+if(W < 50) W = 320; // 後備值，確保一定畫出圖
 
 ```
 var H=200, P={t:14,r:12,b:40,l:52};
@@ -52,7 +52,7 @@ function sy(v){ return P.t+gH*(1-(v-yMin)/(yMax-yMin)); }
 function sx(i){ return P.l+(i+0.5)/n*gW; }
 
 var o=[];
-var vbW=W>10?W:600; o.push('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+vbW+' '+H+'" width="100%" style="display:block;overflow:visible;max-width:100%">');
+var vbW=W>50?W:600; o.push('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 '+vbW+' '+H+'" width="100%" style="display:block;overflow:visible;max-width:100%">');
 
 // Grid + Y 標籤
 for(var t=0;t<=5;t++){
@@ -130,16 +130,16 @@ ALL.push(this);
 ```
 // 用多重時機確保渲染，每次用當前實際寬度
 function tryDraw(n){
-  // 向上找有寬度的祖先
   var w=0, node=el;
-  while(node && w<10){ w=node.getBoundingClientRect().width||node.offsetWidth||0; node=node.parentElement; }
-  if(w<10 && n<25){ setTimeout(function(){ tryDraw(n+1); }, 120); return; }
-  draw(el, cfg);
+  while(node && w<50){ w=node.getBoundingClientRect().width||node.offsetWidth||0; node=node.parentElement; }
+  if(w<50 && n<20){ setTimeout(function(){ tryDraw(n+1); }, 150); return; }
+  draw(el, cfg); // w>=50 或已等夠久，強制畫
 }
 tryDraw(0);
 window.addEventListener('load', function(){ tryDraw(0); }, {once:true});
-setTimeout(function(){ tryDraw(0); }, 300);
-setTimeout(function(){ tryDraw(0); }, 800);
+setTimeout(function(){ tryDraw(0); }, 500);
+setTimeout(function(){ tryDraw(0); }, 1500);
+setTimeout(function(){ tryDraw(0); }, 3000);
 ```
 
 }
