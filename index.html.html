@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HTML GitHub 修復器</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC",Arial,sans-serif;background:#f3efe7;margin:0;padding:16px;color:#222}
+.wrap{max-width:980px;margin:auto}
+h1{font-size:22px;margin:0 0 12px}
+.card{background:white;border:1px solid #cfc7b7;border-radius:14px;padding:16px;margin:12px 0}
+textarea{width:100%;min-height:260px;border:1px solid #bbb;border-radius:10px;padding:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;box-sizing:border-box}
+button{width:100%;padding:14px;border:0;border-radius:10px;background:#111;color:#fff;font-weight:800;font-size:16px;margin-top:10px}
+.small{font-size:13px;color:#666;line-height:1.7}
+.ok{color:#0a5c4a;font-weight:800}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>HTML GitHub 修復器</h1>
+  <div class="card">
+    <div class="small">把 Claude 的 Code 全部貼到下面，按「修復並下載 index.html」。它只修正會讓 GitHub / 瀏覽器壞掉的符號，不改版面、不改邏輯。</div>
+    <textarea id="input" placeholder="請貼上完整 HTML..."></textarea>
+    <button onclick="fixAndDownload()">修復並下載 index.html</button>
+    <div id="msg" class="small"></div>
+  </div>
+</div>
+<script>
+function sanitizeHtml(s){
+  return s
+    .replace(/```html/gi,'')
+    .replace(/```/g,'')
+    .replace(/[‘’]/g,"'")
+    .replace(/[“”]/g,'"')
+    .replace(/[–—]/g,'-')
+    .replace(/…/g,'...')
+    .replace(/var\(-/g,'var(--')
+    .replace(/\.modeBar/g,'#modeBar');
+}
+function fixAndDownload(){
+  let s=document.getElementById('input').value || '';
+  if(!s.trim()){
+    document.getElementById('msg').innerHTML='請先貼上 HTML。';
+    return;
+  }
+  s=sanitizeHtml(s);
+  const blob=new Blob([s],{type:'text/html;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='index.html';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+  document.getElementById('msg').innerHTML='<span class="ok">已下載 index.html。把這個檔案上傳到 GitHub 覆蓋原本的 index.html。</span>';
+}
+</script>
+</body>
+</html>
